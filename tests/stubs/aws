@@ -1,0 +1,10 @@
+#!/bin/zsh -f
+# Fake AWS CLI: `configure get KEY --profile P` reads $STUB_STATE/aws-P-KEY; sts returns creds.
+print -r -- "$*" >> $STUB_STATE/aws-calls
+case "$1 $2" in
+  "configure get") f=$STUB_STATE/aws-$5-$3; [[ -r $f ]] && print -r -- "$(<$f)" || exit 1 ;;
+  "sts get-session-token"|"sts assume-role")
+    [[ -n $AWS_SESSION_TOKEN ]] && { print -u2 "An error occurred: session credentials used"; exit 254 }
+    print '{"Credentials":{"AccessKeyId":"ASIATEST","SecretAccessKey":"sek","SessionToken":"tok","Expiration":"2026-11-27T10:00:00Z"}}' ;;
+  *) print -u2 "stub aws: unexpected: $*"; exit 1 ;;
+esac

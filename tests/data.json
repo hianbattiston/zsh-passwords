@@ -42,6 +42,20 @@
         "domain": "eu-north-1.signin.aws.amazon.com",
         "password": "aws-iam"
       }
+    ],
+    "srv.example.com": [
+      {
+        "username": "deploy",
+        "domain": "srv.example.com",
+        "password": "ssh-pw"
+      }
+    ],
+    "docker.com": [
+      {
+        "username": "dockeruser",
+        "domain": "hub.docker.com",
+        "password": "dk"
+      }
     ]
   },
   "otp": {
@@ -62,6 +76,32 @@
         "username": "b@gmail.com",
         "domain": "google.com",
         "code": "654321"
+      }
+    ],
+    "srv.example.com": [
+      {
+        "username": "deploy",
+        "domain": "srv.example.com",
+        "code": "135790"
+      }
+    ],
+    "aws.amazon.com": [
+      {
+        "username": "other",
+        "domain": "eu-north-1.signin.aws.amazon.com",
+        "code": "999000"
+      },
+      {
+        "username": "hian",
+        "domain": "eu-north-1.signin.aws.amazon.com",
+        "code": "777888"
+      }
+    ],
+    "npmjs.com": [
+      {
+        "username": "me",
+        "domain": "www.npmjs.com",
+        "code": "424242"
       }
     ]
   }

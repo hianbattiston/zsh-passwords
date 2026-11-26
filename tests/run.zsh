@@ -165,6 +165,81 @@ t 'first run: terminal → wizard runs once before the lookup' '
   unset APPLE_PW_NO_SETUP; paired; printf "\n\n\n\n" > answers; _APWZ_TTY=$PWD/answers
   eq "$(pw github.com 2>/dev/null)" gh-secret; [[ -e $XDG_CONFIG_HOME/apple-passwords/config.zsh ]]'
 
+# ---------------------------------------------------------------- developer integrations
+t 'aliases: npm → npmjs.com, docker → docker.com' '
+  _apwz_resolve_site npm; eq $REPLY npmjs.com; _apwz_resolve_site docker; eq $REPLY docker.com'
+
+t 'askpass: "user@host'"'"'s password:"' '
+  paired; eq "$($ROOT/bin/apple-pw-askpass "deploy@srv.example.com'"'"'s password: ")" ssh-pw'
+t 'askpass: "(user@host) Password:"' '
+  paired; eq "$($ROOT/bin/apple-pw-askpass "(deploy@srv.example.com) Password: ")" ssh-pw'
+t 'askpass: "(user@host) Verification code:" → 2FA' '
+  paired; eq "$($ROOT/bin/apple-pw-askpass "(deploy@srv.example.com) Verification code: ")" 135790'
+t 'askpass: host-key question goes to the human' '
+  paired; print yes > answers; export _APWZ_TTY=$PWD/answers
+  eq "$($ROOT/bin/apple-pw-askpass "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")" yes
+  [[ ! -e $STUB_STATE/calls ]]'
+t 'askpass: no terminal and nothing found → fails' '
+  paired; $ROOT/bin/apple-pw-askpass "Enter passphrase for key x: " >/dev/null 2>&1; (( $? != 0 ))'
+
+t 'git helper: get → username/password for the host' '
+  paired; out=$(printf "protocol=https\nhost=srv.example.com\n\n" | $ROOT/bin/git-credential-apple-passwords get)
+  eq "$out" "username=deploy
+password=ssh-pw"'
+t 'git helper: unknown host → no output, git falls back' '
+  paired; out=$(printf "protocol=https\nhost=nothing.example\n\n" | $ROOT/bin/git-credential-apple-passwords get 2>/dev/null)
+  eq $? 0; eq "$out" ""'
+t 'git helper: store/erase ignored' '
+  printf "protocol=https\nhost=x\nusername=u\npassword=p\n\n" | $ROOT/bin/git-credential-apple-passwords store; eq $? 0
+  [[ ! -e $STUB_STATE/calls ]]'
+t 'pw-git: enable/list/disable per host' '
+  pw-git enable srv.example.com 2>/dev/null
+  eq "$(git config --global --get-all credential.https://srv.example.com.helper)" "
+apple-passwords"
+  eq "$(pw-git list)" "https://srv.example.com"
+  pw-git disable srv.example.com 2>/dev/null; eq "$(pw-git list)" ""'
+
+t 'docker helper: get → JSON for the registry' '
+  paired; out=$(print -n srv.example.com | $ROOT/bin/docker-credential-apple-passwords get)
+  eq "$(print -r -- $out | jq -r ".Username + \":\" + .Secret + \":\" + .ServerURL")" "deploy:ssh-pw:srv.example.com"'
+t 'docker helper: Docker Hub URL → docker.com entry' '
+  paired; out=$(print -n https://index.docker.io/v1/ | $ROOT/bin/docker-credential-apple-passwords get)
+  eq "$(print -r -- $out | jq -r .Username)" dockeruser'
+t 'docker helper: not found → protocol message, exit 1' '
+  paired; out=$(print -n nothing.example | $ROOT/bin/docker-credential-apple-passwords get 2>/dev/null)
+  eq $? 1; eq "$out" "credentials not found in native keychain"'
+t 'pw-docker: enable keeps other settings and file mode; disable removes' '
+  mkdir -p $HOME/.docker; print "{\"auths\":{\"x\":{}},\"credsStore\":\"desktop\"}" > $HOME/.docker/config.json
+  chmod 600 $HOME/.docker/config.json
+  pw-docker enable ghcr.io 2>/dev/null; pw-docker enable docker 2>/dev/null
+  c=$HOME/.docker/config.json
+  eq "$(jq -c "[.credsStore, (.auths|keys), .credHelpers]" $c)" "[\"desktop\",[\"x\"],{\"ghcr.io\":\"apple-passwords\",\"https://index.docker.io/v1/\":\"apple-passwords\"}]"
+  eq $(stat -f %Lp $c) 600
+  pw-docker disable ghcr.io 2>/dev/null; eq "$(pw-docker list)" "https://index.docker.io/v1/"'
+
+t 'awsmfa: session token with the MFA device'"'"'s 2FA entry' '
+  paired; print arn:aws:iam::123:mfa/hian > $STUB_STATE/aws-dev-mfa_serial
+  awsmfa dev 2>/dev/null; eq $AWS_ACCESS_KEY_ID ASIATEST; eq $AWS_SESSION_TOKEN tok; eq $AWS_MFA_PROFILE dev
+  grep -q "sts get-session-token --profile dev --serial-number arn:aws:iam::123:mfa/hian --token-code 777888" $STUB_STATE/aws-calls'
+t 'awsmfa: assume-role via source_profile' '
+  paired; print arn:aws:iam::123:mfa/hian > $STUB_STATE/aws-prod-mfa_serial
+  print arn:aws:iam::456:role/Admin > $STUB_STATE/aws-prod-role_arn; print dev > $STUB_STATE/aws-prod-source_profile
+  awsmfa prod 2>/dev/null; eq $AWS_SESSION_TOKEN tok
+  grep -q "sts assume-role --profile dev --role-arn arn:aws:iam::456:role/Admin" $STUB_STATE/aws-calls'
+t 'awsmfa: ignores a session already exported in the shell' '
+  paired; print arn:aws:iam::123:mfa/hian > $STUB_STATE/aws-dev-mfa_serial
+  export AWS_SESSION_TOKEN=old AWS_ACCESS_KEY_ID=ASIAOLD; awsmfa dev 2>/dev/null; eq $AWS_ACCESS_KEY_ID ASIATEST'
+t 'awsmfa: no mfa_serial → explains how to set it' '
+  paired; awsmfa nomfa 2>err; eq $? 2; grep -q "aws configure set mfa_serial" err'
+t 'awsmfa -c clears the session' '
+  export AWS_SESSION_TOKEN=x AWS_ACCESS_KEY_ID=y; awsmfa -c 2>/dev/null; [[ -z ${AWS_SESSION_TOKEN-} && -z ${AWS_ACCESS_KEY_ID-} ]]'
+
+t 'npmotp: --otp from npmjs.com' 'paired; eq "$(npmotp publish --access public)" "npm publish --access public --otp=424242"'
+t 'pwrun --pg sets PGHOST/PGUSER/PGPASSWORD' '
+  paired; eq "$(pwrun --pg deploy@srv.example.com -- zsh -fc "print \$PGHOST \$PGUSER \$PGPASSWORD")" "srv.example.com deploy ssh-pw"'
+t 'pwrun --twine sets TWINE_USERNAME/TWINE_PASSWORD' '
+  paired; eq "$(pwrun --twine srv.example.com -- zsh -fc "print \$TWINE_USERNAME \$TWINE_PASSWORD")" "deploy ssh-pw"'
+
 print
 print "$pass passed, $fail failed"
 (( fail == 0 ))

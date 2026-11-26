@@ -1,0 +1,36 @@
+#!/bin/zsh -f
+# SSH_ASKPASS helper used by `pwssh`: answers ssh password and 2FA prompts from Apple
+# Passwords, using the user and host that ssh itself puts in the prompt:
+#   "user@host's password: "   "(user@host) Password: "   "(user@host) Verification code: "
+# Anything else (host-key confirmation, key passphrases, unknown prompts) is asked on the
+# terminal, exactly as ssh would.
+emulate zsh -o extended_glob
+APPLE_PW_NO_SETUP=1
+source ${0:A:h:h}/apple-passwords.plugin.zsh
+
+prompt=$1 user= host= kind=
+if [[ $prompt == (#b)\(([^@\)]##)@([^\)]##)\)\ * ]]; then
+  user=$match[1] host=$match[2]
+elif [[ $prompt == (#b)([^@[:space:]]##)@([^\'[:space:]]##)\'s\ password:* ]]; then
+  user=$match[1] host=$match[2]
+fi
+if [[ -n $host ]]; then
+  case ${prompt:l} in
+    *(verification\ code|one-time|one\ time|otp|2fa|two-factor|authenticator|token\ code)*) kind=otp ;;
+    *password:*) kind=pw ;;
+  esac
+fi
+
+typeset -a reply
+if [[ $kind == pw ]] && _apwz_get pw $host $user; then print -r -- $reply[1]; exit 0; fi
+if [[ $kind == otp ]] && _apwz_get otp $host; then print -r -- $reply[1]; exit 0; fi
+
+# Fall back to asking the human on the terminal.
+_apwz_has_tty || exit 1
+print -rn -- "$prompt" >>$_APWZ_TTY
+if [[ ${prompt:l} == *(password|passphrase|code|pin)* ]]; then
+  IFS= read -rs answer <$_APWZ_TTY; print >>$_APWZ_TTY
+else
+  IFS= read -r answer <$_APWZ_TTY
+fi
+print -r -- $answer

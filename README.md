@@ -56,7 +56,7 @@ The first lookup runs a short setup wizard (`pw-setup` reruns it).
 | `pw [-c\|-p] <site> [user]` | Password. In a terminal it's copied; piped or `$(pw site)` prints it. `-c`/`-p` force copy/print. Several accounts → picker (fzf if installed, else a numbered menu). |
 | `otp [-c\|-p] <site> [user]` | Current 2FA code. If it expires in under 4 s, waits for the next one. |
 | `pwlogin <site> [user]` | Copies the password, then after a key press the 2FA code (`q` skips). |
-| `pwrun [-e VAR=[user@]site]… [-t VAR=[user@]site]… -- cmd …` | Runs `cmd` with passwords (`-e`) / 2FA codes (`-t`) in its environment only. Usernames may contain `@` (split on the last one). |
+| `pwrun [-e VAR=[user@]site]… [-t VAR=[user@]site]… -- cmd …` | Runs `cmd` with passwords (`-e`) / 2FA codes (`-t`) in its environment only. Usernames may contain `@` (split on the last one). Presets: `--pg`, `--mysql`, `--twine`. |
 | `pw-setup` | Configure auto-lock, clipboard clearing, backend, keybindings. |
 | `pw-status` / `pw-pair` / `pw-lock` | Health check / pair now / stop the bridge and drop pairing. |
 
@@ -72,6 +72,36 @@ The first lookup runs a short setup wizard (`pw-setup` reruns it).
 - **Keys:** <kbd>Ctrl-X</kbd> <kbd>p</kbd> / <kbd>Ctrl-X</kbd> <kbd>o</kbd> start a
   ` pw ` / ` otp ` line with tab completion. Whatever you were typing comes back afterwards. Keys
   are bound only if they're unbound.
+
+## Developer integrations
+
+Each integration uses the tool's own credential hook, so **the tool tells the plugin which
+host or account it needs**. Nothing guesses from screen output.
+
+| Tool | Command | How it works |
+|---|---|---|
+| **AWS CLI** (MFA) | `awsmfa staging` | Reads the profile's `mfa_serial` (+ `role_arn`/`source_profile`), gets the 2FA code from `aws.amazon.com` (one Touch ID), calls STS and exports `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` into the shell. `awsmfa -c` clears them. |
+| **SSH** | `pwssh user@host`, `pwssh scp …`, `pwssh rsync …` | Runs ssh with `SSH_ASKPASS` → `bin/apple-pw-askpass`. ssh passes its prompt (`user@host's password:`, `(user@host) Verification code:`), so the right password or server 2FA code is looked up by host. Host-key questions and key passphrases still ask you. |
+| **git** (HTTPS) | `pw-git enable gitlab.example.com` | Registers `git-credential-apple-passwords` for that host only. git sends `host=…`, the helper answers with username/password. For GitHub, save a personal access token as the password. |
+| **Docker** | `pw-docker enable ghcr.io`, `pw-docker enable docker` | Adds a per-registry `credHelpers` entry using `docker-credential-apple-passwords`. Docker Hub logins are looked up under `docker.com`. Your other Docker settings are left untouched. |
+| **npm / pnpm / yarn** | `npmotp publish`, `npmotp pnpm publish` | Adds `--otp=<code>` from your npmjs.com 2FA entry. |
+| **Postgres / MySQL / PyPI** | `pwrun --pg admin@db.host -- psql`, `pwrun --mysql …`, `pwrun --twine pypi -- twine upload dist/*` | Fills `PGHOST/PGUSER/PGPASSWORD`, `MYSQL_HOST/MYSQL_PWD`, `TWINE_USERNAME/TWINE_PASSWORD` for that one command. |
+| **gh, gcloud, az, Vercel, Heroku** | — | They log in through the browser, which uses Apple Passwords directly. |
+
+Tool aliases: `aws`, `npm`/`pnpm`/`yarn` (npmjs.com), `docker`/`dockerhub` (docker.com),
+`pypi`/`twine`, `github`, `gitlab`, `bitbucket`, `gcp` (google.com), `azure`
+(microsoftonline.com), `heroku`, `vercel`, `cloudflare`, `digitalocean`. So `otp npm` just works.
+
+**Where to save entries:** SSH servers and private registries/git hosts are looked up by
+hostname, so save them in Passwords with that hostname as the website, and add the 2FA code
+to the same entry. For `awsmfa`, the 2FA entry is matched by your MFA device name; set
+`aws configure set apple_pw_user <username> --profile X` if yours differs.
+
+**Notes:**
+- 2FA codes passed as `--token-code`/`--otp` are briefly visible in `ps`; they're single-use
+  and expire within 30 s.
+- AWS session credentials live in that shell's environment until they expire or you run
+  `awsmfa -c`.
 
 ## Configuration
 

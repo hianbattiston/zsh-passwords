@@ -13,7 +13,10 @@ typeset -g _APWZ_CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/config.z
 typeset -g _APWZ_CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/apple-passwords
 typeset -g _APWZ_TTY=${_APWZ_TTY:-/dev/tty}
 typeset -g _APWZ_APW_SOCK=$HOME/.apw/apw.sock
-typeset -g _APWZ_LIBEXEC=${${(%):-%x}:A:h}/libexec
+typeset -g _APWZ_ROOT=${${(%):-%x}:A:h}
+typeset -g _APWZ_LIBEXEC=$_APWZ_ROOT/libexec
+# bin/ holds the helpers git, docker and ssh call themselves (git-credential-…, etc.).
+(( ${path[(Ie)$_APWZ_ROOT/bin]} )) || path+=($_APWZ_ROOT/bin)
 
 # Settings the user set explicitly (env / .zshrc) — pw-setup never overrides these.
 typeset -ga _APWZ_PRESET=(${(k)parameters[(I)APPLE_PW_*]})
@@ -149,9 +152,12 @@ _apwz_query() {
 # Built-in aliases for services whose logins don't live at <name>.com. Add your own with
 #   typeset -A APPLE_PW_ALIASES=(work sso.example.com)   (in .zshrc or the config file)
 typeset -gA _APWZ_DEFAULT_ALIASES=(
-  aws aws.amazon.com
-  gcp cloud.google.com
-  azure portal.azure.com
+  aws aws.amazon.com          gcp google.com             azure microsoftonline.com
+  npm npmjs.com               pnpm npmjs.com             yarn npmjs.com
+  docker docker.com           dockerhub docker.com       pypi pypi.org        twine pypi.org
+  github github.com           gitlab gitlab.com          bitbucket bitbucket.org
+  heroku heroku.com           vercel vercel.com          cloudflare cloudflare.com
+  digitalocean digitalocean.com
 )
 
 # Resolve aliases and shorthand: `github` → a cached `github.*` domain, else github.com.
@@ -339,11 +345,36 @@ captured (\$($1 site)) it is printed. -c / -p force either behaviour.
     pwlogin) print -r -- "usage: pwlogin <site> [username]
 
 Copy the password, then — after a key press — the 2FA code for the same account." ;;
+    awsmfa) print -r -- "usage: awsmfa [profile] [-d seconds] | awsmfa -c
+
+Get temporary AWS credentials with the MFA code from Apple Passwords (one Touch ID) and
+export them into this shell. Uses the profile's mfa_serial (and role_arn/source_profile
+to assume a role). Optional profile keys: apple_pw_site (default aws.amazon.com) and
+apple_pw_user (which 2FA entry to use). -c clears the session." ;;
+    pwssh) print -r -- "usage: pwssh [ssh|scp|sftp|rsync|git] args...
+
+Run ssh (or scp/sftp/rsync/git) with password and 2FA ('Verification code') prompts
+answered from Apple Passwords, using the host and user from ssh's prompt. Save the
+server's login under its hostname. Other prompts (host keys, passphrases) still ask you." ;;
+    npmotp) print -r -- "usage: npmotp [npm|pnpm|yarn] args...
+
+Run with --otp=<your npmjs.com 2FA code>. Example: npmotp publish" ;;
+    pw-git) print -r -- "usage: pw-git enable|disable <host> | pw-git list
+
+Let git fetch HTTPS credentials for <host> from Apple Passwords (per host only).
+For GitHub, save a personal access token as the password — GitHub rejects passwords." ;;
+    pw-docker) print -r -- "usage: pw-docker enable|disable <registry> | pw-docker list
+
+Let docker fetch registry credentials from Apple Passwords (per registry).
+'docker' means Docker Hub (saved under docker.com)." ;;
     pwrun) print -r -- "usage: pwrun [-e VAR=[user@]site]... [-t VAR=[user@]site]... [--] command [args...]
 
 Run a command with secrets in its environment only (never in history, argv or files).
   -e  password       -t  current 2FA code
-Example: pwrun -e PGPASSWORD=admin@db.example.com -- psql -h db.example.com -U admin" ;;
+  --pg [user@]host     PGHOST, PGUSER, PGPASSWORD   (psql, pg_dump, …)
+  --mysql [user@]host  MYSQL_HOST, MYSQL_PWD
+  --twine [user@]site  TWINE_USERNAME, TWINE_PASSWORD   (e.g. --twine pypi)
+Example: pwrun --pg admin@db.example.com -- psql" ;;
   esac
 }
 
@@ -412,12 +443,27 @@ pwlogin() {
 
 pwrun() {
   emulate -L zsh -o extended_glob
-  local -a kinds specs
+  # Parallel arrays, one entry per secret: kind, [user@]site, and the env vars to fill.
+  local -a kinds targets secret_vars user_vars host_vars
+  _apwz_pwrun_add() { kinds+=($1); targets+=("$2"); secret_vars+=($3); user_vars+=("$4"); host_vars+=("$5") }
+  local var tgt
   while (( $# )); do
     case $1 in
       -e|-t)
         (( $# >= 2 )) || { _apwz_err "$1 needs VAR=[user@]site"; return 2 }
-        kinds+=(${${1/-e/pw}/-t/otp}); specs+=("$2"); shift 2 ;;
+        var=${2%%=*} tgt=${2#*=}
+        if [[ $2 != *=* || $var != [A-Za-z_][A-Za-z0-9_]# || -z $tgt ]]; then
+          _apwz_err "bad spec '$2' (expected VAR=[user@]site)"; return 2
+        fi
+        _apwz_pwrun_add ${${1/-e/pw}/-t/otp} $tgt $var "" ""; shift 2 ;;
+      --pg|--mysql|--twine)
+        (( $# >= 2 )) || { _apwz_err "$1 needs [user@]host"; return 2 }
+        case $1 in
+          --pg)    _apwz_pwrun_add pw "$2" PGPASSWORD PGUSER PGHOST ;;
+          --mysql) _apwz_pwrun_add pw "$2" MYSQL_PWD "" MYSQL_HOST ;;
+          --twine) _apwz_pwrun_add pw "$2" TWINE_PASSWORD TWINE_USERNAME "" ;;
+        esac
+        shift 2 ;;
       -h|--help) _apwz_usage pwrun; return 0 ;;
       --) shift; break ;;
       -*) _apwz_err "unknown option: $1"; return 2 ;;
@@ -426,23 +472,149 @@ pwrun() {
   done
   if (( ! $#kinds || ! $# )); then _apwz_usage pwrun >&2; return 2; fi
 
-  local -a vars secrets reply
-  local i spec var target site user
+  # Look everything up first (back-to-back, so one Touch ID approval usually covers all),
+  # and run nothing if any lookup fails.
+  local -a exports reply
+  local i site user
   for i in {1..$#kinds}; do
-    spec=$specs[i]; var=${spec%%=*}; target=${spec#*=}
-    if [[ $spec != *=* || $var != [A-Za-z_][A-Za-z0-9_]# || -z $target ]]; then
-      _apwz_err "bad spec '$spec' (expected VAR=[user@]site)"; return 2
-    fi
-    if [[ $target == *@* ]]; then user=${target%@*}; site=${target##*@}   # last @: emails work
-    else user=; site=$target; fi
+    tgt=$targets[i]
+    if [[ $tgt == *@* ]]; then user=${tgt%@*} site=${tgt##*@}   # last @: emails work
+    else user= site=$tgt; fi
     _apwz_get $kinds[i] $site "$user" || return
-    vars+=($var); secrets+=("$reply[1]")
+    exports+=("$secret_vars[i]=$reply[1]")
+    [[ -n $user_vars[i] ]] && exports+=("$user_vars[i]=$reply[2]")
+    [[ -n $host_vars[i] ]] && exports+=("$host_vars[i]=$site")
   done
   (
-    for i in {1..$#vars}; do export "$vars[i]=$secrets[i]"; done
-    unset secrets reply
+    local e
+    for e in "${exports[@]}"; do export "$e"; done
+    unset exports reply
     if (( $+commands[$1] )); then exec "$@"; else "$@"; fi
   )
+}
+
+# ------------------------------------------------------------- developer integrations
+
+# awsmfa [profile] — temporary AWS credentials using the MFA code from Apple Passwords.
+awsmfa() {
+  emulate -L zsh -o extended_glob
+  local profile=${AWS_PROFILE:-default} duration=
+  while (( $# )); do
+    case $1 in
+      -d|--duration) duration=$2; shift 2 ;;
+      -c|--clear)
+        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_MFA_PROFILE AWS_MFA_EXPIRATION
+        _apwz_msg "✓ cleared the AWS MFA session from this shell"; return 0 ;;
+      -h|--help) _apwz_usage awsmfa; return 0 ;;
+      -*) _apwz_err "unknown option: $1"; return 2 ;;
+      *) profile=$1; shift ;;
+    esac
+  done
+  (( $+commands[aws] )) || { _apwz_err "the AWS CLI is not installed: brew install awscli"; return 1 }
+
+  # Long-term keys must make the STS call, so ignore any session already exported here.
+  local -a aws_base=(env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN aws)
+  _apwz_awscfg() { $aws_base configure get $1 --profile $profile 2>/dev/null }
+  local serial role src site user
+  serial=$(_apwz_awscfg mfa_serial); role=$(_apwz_awscfg role_arn)
+  src=$(_apwz_awscfg source_profile)
+  site=$(_apwz_awscfg apple_pw_site); user=$(_apwz_awscfg apple_pw_user)
+  if [[ -z $serial ]]; then
+    _apwz_err "profile '$profile' has no mfa_serial. Set it once (IAM → Security credentials → MFA):
+    aws configure set mfa_serial arn:aws:iam::<account-id>:mfa/<device-name> --profile $profile"
+    return 2
+  fi
+
+  # The 2FA entry: apple_pw_user if configured, else the MFA device name, else pick.
+  local -a reply
+  if [[ -n $user ]]; then
+    _apwz_get otp ${site:-aws} $user || return
+  elif ! _apwz_get otp ${site:-aws} ${serial##*/} 2>/dev/null; then
+    _apwz_get otp ${site:-aws} || return
+  fi
+  _apwz_fresh_otp ${site:-aws} "$reply[2]" || return
+  local code=$reply[1] out
+  if [[ -n $role ]]; then
+    out=$($aws_base sts assume-role --profile ${src:-$profile} --role-arn $role \
+      --role-session-name "apple-pw-${USER:-cli}" --serial-number $serial --token-code $code \
+      ${duration:+--duration-seconds} $duration --output json 2>&1)
+  else
+    out=$($aws_base sts get-session-token --profile $profile --serial-number $serial \
+      --token-code $code ${duration:+--duration-seconds} $duration --output json 2>&1)
+  fi
+  if (( $? )); then _apwz_err "AWS refused: ${out//$'\n'/ }"; return 1; fi
+  local -a creds
+  creds=("${(@f)$(print -r -- $out | jq -r '.Credentials | .AccessKeyId, .SecretAccessKey, .SessionToken, .Expiration')}")
+  [[ $creds[1] == A* && -n $creds[3] ]] || { _apwz_err "unexpected answer from AWS STS"; return 1 }
+  export AWS_ACCESS_KEY_ID=$creds[1] AWS_SECRET_ACCESS_KEY=$creds[2] AWS_SESSION_TOKEN=$creds[3]
+  export AWS_MFA_PROFILE=$profile AWS_MFA_EXPIRATION=$creds[4]
+  _apwz_msg "✓ AWS MFA session for '$profile'${role:+ as ${role##*/}} — expires $creds[4] (awsmfa -c to clear)"
+}
+
+# pwssh [ssh|scp|sftp|rsync|git] args… — ssh passwords and server 2FA prompts answered
+# from Apple Passwords, matched by host from ssh's own prompt (see bin/apple-pw-askpass).
+pwssh() {
+  emulate -L zsh -o extended_glob
+  local cmd=ssh
+  [[ $1 == (ssh|scp|sftp|rsync|git) ]] && { cmd=$1; shift }
+  [[ $1 == (-h|--help) || $# == 0 ]] && { _apwz_usage pwssh; [[ $# != 0 ]]; return }
+  SSH_ASKPASS=$_APWZ_ROOT/bin/apple-pw-askpass SSH_ASKPASS_REQUIRE=force \
+    DISPLAY=${DISPLAY:-apple-pw} command $cmd "$@"
+}
+
+# npmotp [npm|pnpm|yarn] args… — run with --otp from your npmjs.com 2FA entry.
+npmotp() {
+  emulate -L zsh -o extended_glob
+  local tool=npm
+  [[ $1 == (npm|pnpm|yarn) ]] && { tool=$1; shift }
+  [[ $1 == (-h|--help) || $# == 0 ]] && { _apwz_usage npmotp; [[ $# != 0 ]]; return }
+  local -a reply
+  _apwz_get otp npm || return
+  _apwz_fresh_otp npm "$reply[2]" || return
+  command $tool "$@" --otp=$reply[1]
+}
+
+# pw-git enable|disable|list [host] — answer git's HTTPS credential requests for a host.
+pw-git() {
+  emulate -L zsh
+  local key="credential.https://$2.helper"
+  case $1 in
+    enable)
+      [[ -n $2 ]] || { _apwz_usage pw-git >&2; return 2 }
+      git config --global --unset-all $key 2>/dev/null
+      git config --global --add $key ""                 # reset: Apple Passwords is the only source
+      git config --global --add $key apple-passwords
+      _apwz_msg "✓ git will ask Apple Passwords for https://$2 (pw-git disable $2 to undo)" ;;
+    disable)
+      [[ -n $2 ]] || { _apwz_usage pw-git >&2; return 2 }
+      git config --global --unset-all $key && _apwz_msg "✓ removed for https://$2" ;;
+    list|"")
+      git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null |
+        awk '$2 == "apple-passwords" { sub(/^credential\./, "", $1); sub(/\.helper$/, "", $1); print $1 }' ;;
+    *) _apwz_usage pw-git >&2; return 2 ;;
+  esac
+}
+
+# pw-docker enable|disable|list [registry] — answer docker's credential requests.
+pw-docker() {
+  emulate -L zsh -o extended_glob
+  local cfg=${DOCKER_CONFIG:-$HOME/.docker}/config.json reg=$2 json mode=600
+  [[ $reg == (docker|hub|dockerhub|docker.io|index.docker.io) ]] && reg=https://index.docker.io/v1/
+  if [[ -r $cfg ]]; then json=$(<$cfg); mode=$(stat -f %Lp $cfg); else json='{}'; fi
+  case $1 in
+    enable|disable)
+      [[ -n $reg ]] || { _apwz_usage pw-docker >&2; return 2 }
+      local filter='.credHelpers[$r] = "apple-passwords"'
+      [[ $1 == disable ]] && filter='del(.credHelpers[$r])'
+      mkdir -p ${cfg:h}
+      local tmp=$(mktemp ${cfg:h}/.config.json.XXXXXX)
+      print -r -- $json | jq --arg r $reg $filter >| $tmp && chmod $mode $tmp && mv $tmp $cfg \
+        || { rm -f $tmp; _apwz_err "could not update $cfg"; return 1 }
+      _apwz_msg "✓ docker ${${1/enable/will use}/disable/no longer uses} Apple Passwords for $reg" ;;
+    list|"")
+      print -r -- $json | jq -r '.credHelpers // {} | to_entries[] | select(.value == "apple-passwords") | .key' ;;
+    *) _apwz_usage pw-docker >&2; return 2 ;;
+  esac
 }
 
 pw-pair()   { emulate -L zsh; _apwz_backend || return; _apwz_pair $REPLY }
