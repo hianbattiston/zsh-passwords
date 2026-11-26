@@ -52,6 +52,26 @@ t 'pw: several matches, no terminal → exit 2 listing accounts' '
   paired; pw google.com >/dev/null 2>err; eq $? 2; grep -q "a@gmail.com" err'
 t 'pw: several matches, picker (select) chooses 2nd' '
   paired; print 2 > answers; _APWZ_TTY=$PWD/answers; eq "$(pw google.com 2>/dev/null)" g2'
+t 'picker flow: lists names first, then reads only the chosen password' '
+  paired; print 2 > answers; _APWZ_TTY=$PWD/answers; eq "$(pw google.com 2>/dev/null)" g2
+  eq "$(<$STUB_STATE/calls)" "list google.com
+pw get google.com b@gmail.com -o json"'
+t 'picker flow (apw): pw list, then one pw get' '
+  APPLE_PW_BACKEND=apw; paired; print 1 > answers; _APWZ_TTY=$PWD/answers
+  eq "$(pw google.com 2>/dev/null)" g1
+  eq "$(<$STUB_STATE/calls)" "list google.com
+pw get google.com a@gmail.com"'
+t 'username given: no listing, single read' '
+  paired; pw google.com a@gmail.com >/dev/null; eq "$(<$STUB_STATE/calls)" "pw get google.com a@gmail.com -o json"'
+t 'narrowing: aws.amazon.com hides plain amazon.com logins' '
+  paired; _apwz_query apwcli list aws.amazon.com ""
+  eq "$(print -r -- $REPLY | jq -r "[.[].username] | join(\",\")")" "root@example.com,iam-user"'
+t 'alias: aws → aws.amazon.com' '_apwz_resolve_site aws; eq $REPLY aws.amazon.com'
+t 'alias: user aliases win' '
+  typeset -A APPLE_PW_ALIASES=(work corp.example aws my.aws.example); _apwz_resolve_site work; eq $REPLY corp.example
+  _apwz_resolve_site aws; eq $REPLY my.aws.example'
+t 'guessed .com miss suggests full domain / alias' '
+  paired; pw zzz >/dev/null 2>err; eq $? 3; grep -q "guessed as zzz.com" err'
 t 'pw: nothing saved → exit 3' '
   paired; pw nothing.example 2>err; eq $? 3; grep -q "no password saved" err'
 t 'pw: bad usage → exit 2' 'pw 2>/dev/null; eq $? 2; pw --bogus x 2>/dev/null; eq $? 2'

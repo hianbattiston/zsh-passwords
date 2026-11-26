@@ -1,23 +1,68 @@
 {
   "pw": {
     "github.com": [
-      {"username": "me@example.com", "domain": "github.com", "password": "gh-secret"}
+      {
+        "username": "me@example.com",
+        "domain": "github.com",
+        "password": "gh-secret"
+      }
     ],
     "google.com": [
-      {"username": "a@gmail.com", "domain": "accounts.google.com", "password": "g1"},
-      {"username": "b@gmail.com", "domain": "accounts.google.com", "password": "g2"}
+      {
+        "username": "a@gmail.com",
+        "domain": "accounts.google.com",
+        "password": "g1"
+      },
+      {
+        "username": "b@gmail.com",
+        "domain": "accounts.google.com",
+        "password": "g2"
+      }
     ],
     "corp.example": [
-      {"username": "admin", "domain": "corp.example", "password": "c0rp"}
+      {
+        "username": "admin",
+        "domain": "corp.example",
+        "password": "c0rp"
+      }
+    ],
+    "aws.amazon.com": [
+      {
+        "username": "shopper@example.com",
+        "domain": "www.amazon.com",
+        "password": "shop"
+      },
+      {
+        "username": "root@example.com",
+        "domain": "signin.aws.amazon.com",
+        "password": "aws-root"
+      },
+      {
+        "username": "iam-user",
+        "domain": "eu-north-1.signin.aws.amazon.com",
+        "password": "aws-iam"
+      }
     ]
   },
   "otp": {
     "github.com": [
-      {"username": "me@example.com", "domain": "github.com", "code": "111222"}
+      {
+        "username": "me@example.com",
+        "domain": "github.com",
+        "code": "111222"
+      }
     ],
     "google.com": [
-      {"username": "a@gmail.com", "domain": "google.com", "code": "123456"},
-      {"username": "b@gmail.com", "domain": "google.com", "code": "654321"}
+      {
+        "username": "a@gmail.com",
+        "domain": "google.com",
+        "code": "123456"
+      },
+      {
+        "username": "b@gmail.com",
+        "domain": "google.com",
+        "code": "654321"
+      }
     ]
   }
 }

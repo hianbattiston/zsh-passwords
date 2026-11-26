@@ -60,8 +60,15 @@ The first lookup runs a short setup wizard (`pw-setup` reruns it).
 | `pw-setup` | Configure auto-lock, clipboard clearing, backend, keybindings. |
 | `pw-status` / `pw-pair` / `pw-lock` | Health check / pair now / stop the bridge and drop pairing. |
 
-- **Shorthand:** a site without a dot, such as `pw github`, resolves to a cached `github.*` site,
-  otherwise to `github.com`.
+- **One prompt per lookup:** macOS asks you to authorise every password it hands out. Like a
+  browser, `pw` first lists the site's account names (no password read, no prompt), lets you
+  pick one, then reads only that password. Pass the username (`pw site user`) to skip the list.
+- **Narrowing:** Apple matches by base domain (`aws.amazon.com` would also return every
+  amazon.com shopping login), so results are narrowed to the host you typed and its subdomains.
+- **Aliases and shorthand:** `aws`, `gcp` and `azure` are built-in aliases (`aws` →
+  `aws.amazon.com`). Add your own with `typeset -A APPLE_PW_ALIASES=(work sso.example.com)`.
+  Any other dot-less name, such as `pw github`, resolves to a cached `github.*` site, otherwise
+  to `github.com`.
 - **Keys:** <kbd>Ctrl-X</kbd> <kbd>p</kbd> / <kbd>Ctrl-X</kbd> <kbd>o</kbd> start a
   ` pw ` / ` otp ` line with tab completion. Whatever you were typing comes back afterwards. Keys
   are bound only if they're unbound.
@@ -78,6 +85,7 @@ The first lookup runs a short setup wizard (`pw-setup` reruns it).
 | `APPLE_PW_BACKEND` | `auto` | `auto`, `apwcli`, or `apw` |
 | `APPLE_PW_BIND_KEYS` | `1` | <kbd>Ctrl-X</kbd> <kbd>p</kbd> / <kbd>o</kbd> |
 | `APPLE_PW_CACHE` | `1` | Remember site + username (never secrets) for completion and shorthand |
+| `APPLE_PW_ALIASES` | unset | Associative array of your own aliases, e.g. `(work sso.example.com)` |
 | `APPLE_PW_NO_SETUP` | unset | `1` skips the first-run wizard |
 
 ## Security model

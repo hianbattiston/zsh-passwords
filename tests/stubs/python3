@@ -1,0 +1,7 @@
+#!/bin/zsh -f
+# Fake "apwcli's Python" running libexec/apwz-accounts.py: account names only, no passwords.
+[[ $1 == -I ]] && shift
+site=$2
+[[ -e $STUB_STATE/paired ]] || { print -u2 '{"error":"session is not paired","status":9,"results":[]}'; exit 9 }
+print -r -- "list $site" >> $STUB_STATE/calls
+jq -c --arg s $site '{results: [(.pw[$s] // [])[] | {username, domain, sites: [.domain]}], status: 0}' $STUB_DATA

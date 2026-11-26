@@ -13,6 +13,7 @@ typeset -g _APWZ_CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/config.z
 typeset -g _APWZ_CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/apple-passwords
 typeset -g _APWZ_TTY=${_APWZ_TTY:-/dev/tty}
 typeset -g _APWZ_APW_SOCK=$HOME/.apw/apw.sock
+typeset -g _APWZ_LIBEXEC=${${(%):-%x}:A:h}/libexec
 
 # Settings the user set explicitly (env / .zshrc) — pw-setup never overrides these.
 typeset -ga _APWZ_PRESET=(${(k)parameters[(I)APPLE_PW_*]})
@@ -90,11 +91,28 @@ _apwz_ready() {
   _apwz_pair apwcli
 }
 
+# apwcli's own Python (it carries apwlib), for the names-only account listing.
+_apwz_apwcli_python() {
+  local bin=${commands[apwcli]:A:h} py
+  for py in $bin/python3 $bin/python; do [[ -x $py ]] && { REPLY=$py; return 0 }; done
+  return 1
+}
+
+# Can this backend list a site's accounts without reading their passwords?
+_apwz_can_list() {
+  [[ $1 == apw ]] && return 0
+  [[ -r $_APWZ_LIBEXEC/apwz-accounts.py ]] && _apwz_apwcli_python
+}
+
 # _apwz_query BACKEND KIND SITE [USER] → $REPLY = JSON array of matches. 3 = none.
+# KIND: pw | otp | list (account names only — no passwords read, so no macOS prompts).
 _apwz_query() {
-  local be=$1 kind=$2 site=$3 user=$4 out rc attempt
+  local be=$1 kind=$2 site=$3 user=$4 out rc attempt py
+  [[ $be/$kind == apwcli/list ]] && { _apwz_apwcli_python || return 1; py=$REPLY }
   for attempt in 1 2; do
     case $be/$kind in
+      apwcli/list) out=$($py -I $_APWZ_LIBEXEC/apwz-accounts.py $site </dev/null 2>&1) ;;
+      apw/list)    out=$(apw pw list $site </dev/null 2>&1) ;;
       apwcli/*) out=$(apwcli $kind get $site ${user:+"$user"} -o json </dev/null 2>&1) ;;
       apw/pw)   out=$(apw pw get $site ${user:+"$user"} </dev/null 2>&1) ;;
       apw/otp)  out=$(apw otp get $site </dev/null 2>&1) ;;
@@ -112,20 +130,40 @@ _apwz_query() {
     _apwz_err "${msg:-$be failed (exit $rc)}"
     return rc
   fi
-  REPLY=$(print -r -- $json | jq -c --arg u "$user" '[.results[]? | select($u == "" or .username == $u)]') \
+  # Apple matches by registrable domain (aws.amazon.com → every amazon.com login), so keep
+  # only entries on the host asked for or its subdomains — unless that leaves nothing.
+  local host=${${${site#*://}%%/*}%%:*}
+  REPLY=$(print -r -- $json | jq -c --arg u "$user" --arg h "${host:l}" '
+    def under: ascii_downcase | . == $h or endswith("." + $h);
+    [.results[]? | select($u == "" or .username == $u)] as $all
+    | [$all[] | select([(.sites // [])[], .domain] | map(select(type == "string")) | any(under))]
+    | if length > 0 then . else $all end') \
     || { _apwz_err "unexpected output from $be"; return 100 }
   [[ $REPLY != '[]' ]] || return 3
 }
 
-# A site without a dot is shorthand: `github` → a cached `github.*` domain, else github.com.
+# Built-in aliases for services whose logins don't live at <name>.com. Add your own with
+#   typeset -A APPLE_PW_ALIASES=(work sso.example.com)   (in .zshrc or the config file)
+typeset -gA _APWZ_DEFAULT_ALIASES=(
+  aws aws.amazon.com
+  gcp cloud.google.com
+  azure portal.azure.com
+)
+
+# Resolve aliases and shorthand: `github` → a cached `github.*` domain, else github.com.
+# Sets _apwz_guessed=1 when the .com fallback was used (for a better "not found" message).
 _apwz_resolve_site() {
-  REPLY=$1
+  REPLY=$1 _apwz_guessed=0
+  local alias=
+  [[ ${(t)APPLE_PW_ALIASES} == association* ]] && alias=${APPLE_PW_ALIASES[$1]}
+  : ${alias:=${_APWZ_DEFAULT_ALIASES[$1]}}
+  [[ -n $alias ]] && { REPLY=$alias; return }
   [[ $REPLY == *.* || $REPLY == *:* || $REPLY == localhost ]] && return
   local f=$_APWZ_CACHE_DIR/accounts
   local -a lines matches
   [[ -r $f ]] && lines=("${(@f)$(<$f)}")
   matches=(${(M)${lines%%$'\t'*}:#$1.*})
-  REPLY=${matches[1]:-$1.com}
+  if (( $#matches )); then REPLY=$matches[1]; else REPLY=$1.com _apwz_guessed=1; fi
 }
 
 # _apwz_pick JSON_ARRAY → $REPLY = chosen 0-based index.
@@ -216,21 +254,46 @@ _apwz_touch() {
 
 # _apwz_get KIND SITE [USER] → reply=(secret username domain)
 _apwz_get() {
-  local kind=$1 site user=$3 be json rc
+  local kind=$1 site user=$3 be json rc idx=0 _apwz_guessed=0
   _apwz_firstrun
   _apwz_backend || return 1; be=$REPLY
   _apwz_resolve_site $2; site=$REPLY
   _apwz_ready $be || return 9
-  _apwz_query $be $kind $site "$user"; rc=$?
+
+  if [[ $kind == pw && -z $user ]] && _apwz_can_list $be; then
+    # Like a browser: list account names (no password read, so no macOS prompt), pick one,
+    # then read only that password. macOS asks to authorise every password it hands out,
+    # so fetching all of a site's passwords would prompt once per account.
+    _apwz_query $be list $site ""; rc=$?
+    if (( rc == 0 )); then
+      local names=$REPLY pick_user pick_domain
+      _apwz_pick "$names" || return
+      pick_user=$(print -r -- $names | jq -r --argjson i $REPLY '.[$i].username')
+      pick_domain=$(print -r -- $names | jq -r --argjson i $REPLY '.[$i].domain')
+      _apwz_query $be pw $site "$pick_user"; rc=$?
+      if (( rc == 0 )); then
+        json=$REPLY
+        idx=$(print -r -- $json | jq --arg d "$pick_domain" '(map(.domain) | index($d)) // 0')
+      fi
+    fi
+  else
+    _apwz_query $be $kind $site "$user"; rc=$?
+    if (( rc == 0 )); then
+      json=$REPLY
+      _apwz_pick "$json" || return
+      idx=$REPLY
+    fi
+  fi
+
   if (( rc == 3 )); then
     _apwz_err "no ${${kind/pw/password}/otp/2FA code} saved for $site${user:+ ($user)}"
+    (( _apwz_guessed )) && _apwz_msg "  ('$2' was guessed as $site — use the full domain,
+   or add an alias: typeset -A APPLE_PW_ALIASES=($2 real.domain.com))"
     return 3
   fi
   (( rc == 0 )) || return rc
-  json=$REPLY
-  _apwz_pick "$json" || return
   reply=("${(@f)$(print -r -- $json |
-    jq -r --argjson i $REPLY '.[$i] | (.password // .code // ""), .username, .domain')}")
+    jq -r --argjson i $idx '.[$i] | (.password // .code // ""), .username, .domain')}")
   _apwz_cache_add $site "$reply[2]"
   _apwz_touch $be
 }
