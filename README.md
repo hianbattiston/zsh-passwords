@@ -200,3 +200,7 @@ real passwords.
 
 Linux, Windows and other password managers (1Password, Bitwarden, KeePassXC, …) are planned —
 see [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## License
+
+[MIT](LICENSE). The backends ([apwcli](https://github.com/michel-tricot/apwcli), MIT; [bendews/apw](https://github.com/bendews/apw), GPL-3.0) are separate projects with their own licenses; this plugin only runs their command-line tools.
