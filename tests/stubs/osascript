@@ -1,0 +1,9 @@
+#!/bin/zsh -f
+# Fake osascript: the copy call stores stdin as "the clipboard"; the delayed-clear call is
+# only recorded (its argv must never contain the secret).
+if [[ $* == *delay\(* ]]; then
+  print -r -- "$*" >> $STUB_STATE/clearjobs
+  exit 0
+fi
+cat > $STUB_STATE/clipboard
+print 42

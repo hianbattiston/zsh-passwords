@@ -1,0 +1,21 @@
+#!/bin/zsh -f
+# Fake bendews/apw for tests: fails fast with status 9 when unpaired, 3 when nothing matches.
+[[ $1 == --version ]] && { print v1.1.1; exit 0 }
+unpaired() { print -u2 '{"error":"unpaired","status":9,"results":[]}'; exit 9 }
+case "$1 $2" in
+  "auth ") touch $STUB_STATE/paired; print '{"status":0}'; print auth >> $STUB_STATE/log ;;
+  "pw list") [[ -e $STUB_STATE/paired ]] || unpaired
+             print -u2 '{"error":"No results found","status":3,"results":[]}'; exit 3 ;;
+  "pw get"|"otp get")
+    [[ -e $STUB_STATE/paired ]] || unpaired
+    kind=$1 site=$3 user=$4
+    [[ $kind == otp ]] && user=     # real apw otp get takes no username
+    print -r -- "$*" >> $STUB_STATE/calls
+    out=$(jq -c --arg k $kind --arg s $site --arg u "$user" \
+      '{results: [(.[$k][$s] // [])[] | select($u == "" or .username == $u)], status: 0}' $STUB_DATA)
+    if [[ $out == *'"results":[]'* ]]; then
+      print -u2 '{"error":"No results found","status":3,"results":[]}'; exit 3
+    fi
+    print -r -- $out ;;
+  *) print -u2 "stub apw: unexpected args: $*"; exit 1 ;;
+esac

@@ -1,0 +1,23 @@
+{
+  "pw": {
+    "github.com": [
+      {"username": "me@example.com", "domain": "github.com", "password": "gh-secret"}
+    ],
+    "google.com": [
+      {"username": "a@gmail.com", "domain": "accounts.google.com", "password": "g1"},
+      {"username": "b@gmail.com", "domain": "accounts.google.com", "password": "g2"}
+    ],
+    "corp.example": [
+      {"username": "admin", "domain": "corp.example", "password": "c0rp"}
+    ]
+  },
+  "otp": {
+    "github.com": [
+      {"username": "me@example.com", "domain": "github.com", "code": "111222"}
+    ],
+    "google.com": [
+      {"username": "a@gmail.com", "domain": "google.com", "code": "123456"},
+      {"username": "b@gmail.com", "domain": "google.com", "code": "654321"}
+    ]
+  }
+}

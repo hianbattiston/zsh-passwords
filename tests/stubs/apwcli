@@ -1,0 +1,23 @@
+#!/bin/zsh -f
+# Fake apwcli for tests. Data: $STUB_DATA (JSON {pw:{site:[...]}, otp:{site:[...]}}).
+# State: $STUB_STATE/paired (pairing), $STUB_STATE/log (daemon ops), $STUB_STATE/calls.
+case "$1 $2" in
+  "daemon status")
+    if [[ -e $STUB_STATE/paired ]]; then print '{"running": true, "bridge": true, "paired": true}'
+    else print '{"running": true, "bridge": true, "paired": false}'; fi ;;
+  "daemon pair") touch $STUB_STATE/paired; print '● paired'; print pair >> $STUB_STATE/log ;;
+  "daemon stop") rm -f $STUB_STATE/paired; print stop >> $STUB_STATE/log ;;
+  "doctor") print '● daemon running' ;;
+  "pw get"|"otp get")
+    kind=$1 site=$3 user=$4
+    [[ $user == -o ]] && user=
+    print -r -- "$*" >> $STUB_STATE/calls
+    if [[ ! -e $STUB_STATE/paired ]]; then
+      # Real apwcli auto-pairs here (prompt on stdout / PIN window): emulate the stdout noise.
+      print '● opening a PIN window — enter the code macOS is showing'
+      touch $STUB_STATE/paired
+    fi
+    jq -c --arg k $kind --arg s $site --arg u "$user" \
+      '{results: [(.[$k][$s] // [])[] | select($u == "" or .username == $u)], status: 0}' $STUB_DATA ;;
+  *) print -u2 "stub apwcli: unexpected args: $*"; exit 1 ;;
+esac
