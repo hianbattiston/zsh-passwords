@@ -12,6 +12,9 @@ case "$1 $2" in
     kind=$1 site=$3 user=$4
     [[ $user == -o ]] && user=
     print -r -- "$*" >> $STUB_STATE/calls
+    if [[ -e $STUB_STATE/timeout ]]; then
+      print -u2 '{"error": "native helper timed out", "status": 100, "results": []}'; exit 100
+    fi
     if [[ ! -e $STUB_STATE/paired ]]; then
       # Real apwcli auto-pairs here (prompt on stdout / PIN window): emulate the stdout noise.
       print '● opening a PIN window — enter the code macOS is showing'

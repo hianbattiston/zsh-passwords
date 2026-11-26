@@ -127,7 +127,11 @@ _apwz_query() {
   if (( rc == 3 )); then return 3; fi
   if (( rc != 0 )); then
     local msg; msg=$(print -r -- $json | jq -r '.error // empty' 2>/dev/null)
-    _apwz_err "${msg:-$be failed (exit $rc)}"
+    if [[ $msg == *timed\ out* ]]; then
+      _apwz_err "macOS didn't get an answer in time — approve the Touch ID prompt for Passwords, then retry"
+    else
+      _apwz_err "${msg:-$be failed (exit $rc)}"
+    fi
     return rc
   fi
   # Apple matches by registrable domain (aws.amazon.com → every amazon.com login), so keep
@@ -378,19 +382,31 @@ pwlogin() {
   if [[ $1 == (-h|--help) ]] || (( $# < 1 || $# > 2 )); then
     _apwz_usage pwlogin; [[ $1 == (-h|--help) ]]; return
   fi
-  local -a reply
+  local -a reply pw_reply otp_reply
   _apwz_get pw $1 "$2" || return
-  local user=$reply[2]
+  pw_reply=("${reply[@]}")
+
+  # Fetch the 2FA code right away, while the Touch ID approval for the password is still
+  # fresh (macOS reuses an approval for a short while), and keep it in memory.
+  local period=0
+  if _apwz_get otp $1 "$pw_reply[2]" 2>/dev/null || _apwz_get otp $1; then
+    _apwz_fresh_otp $1 "$reply[2]" && { otp_reply=("${reply[@]}"); period=$(( EPOCHSECONDS / 30 )) }
+  fi
+
+  reply=("${pw_reply[@]}")
   _apwz_deliver copy pw || return
+  (( $#otp_reply )) || return 0
   _apwz_has_tty || return 0
   local key
   read -u0 -sk1 "key?Paste it, then press any key for the 2FA code (q to skip)… " <$_APWZ_TTY
   print -u2
   [[ $key == [qQ] ]] && return 0
-  if ! _apwz_get otp $1 "$user" 2>/dev/null; then
-    _apwz_get otp $1 || return       # 2FA saved under another name: the site's only code / picker
+  if (( EPOCHSECONDS / 30 == period )); then
+    reply=("${otp_reply[@]}")
+  else                                   # the code rolled over while you were pasting
+    _apwz_get otp $1 "$otp_reply[2]" || return
+    _apwz_fresh_otp $1 "$reply[2]" || return
   fi
-  _apwz_fresh_otp $1 "$reply[2]" || return
   _apwz_deliver copy otp
 }
 

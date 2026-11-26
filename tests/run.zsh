@@ -72,6 +72,22 @@ t 'alias: user aliases win' '
   _apwz_resolve_site aws; eq $REPLY my.aws.example'
 t 'guessed .com miss suggests full domain / alias' '
   paired; pw zzz >/dev/null 2>err; eq $? 3; grep -q "guessed as zzz.com" err'
+t 'pwlogin: password + 2FA fetched back-to-back, before the key press' '
+  paired; print x > answers; _APWZ_TTY=$PWD/answers; pwlogin github.com 2>/dev/null
+  # (a 4th otp call may legitimately follow if the code rolled over during the test)
+  eq "$(head -3 $STUB_STATE/calls)" "list github.com
+pw get github.com me@example.com -o json
+otp get github.com me@example.com -o json"
+  eq "$(<$STUB_STATE/clipboard)" 111222'
+t 'pwlogin: q skips the 2FA copy' '
+  paired; print q > answers; _APWZ_TTY=$PWD/answers; pwlogin github.com 2>/dev/null
+  eq "$(<$STUB_STATE/clipboard)" gh-secret'
+t 'pwlogin: site without 2FA just copies the password' '
+  paired; print x > answers; _APWZ_TTY=$PWD/answers; pwlogin corp.example 2>/dev/null; eq $? 0
+  eq "$(<$STUB_STATE/clipboard)" c0rp'
+t 'Touch ID not approved in time → clear message' '
+  paired; touch $STUB_STATE/timeout; pw github.com me@example.com >/dev/null 2>err; eq $? 100
+  grep -q "approve the Touch ID prompt" err'
 t 'pw: nothing saved → exit 3' '
   paired; pw nothing.example 2>err; eq $? 3; grep -q "no password saved" err'
 t 'pw: bad usage → exit 2' 'pw 2>/dev/null; eq $? 2; pw --bogus x 2>/dev/null; eq $? 2'
