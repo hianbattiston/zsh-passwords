@@ -247,6 +247,28 @@ t 'make hook: other targets run untouched (no lookup)' '
   paired; typeset -A APPLE_PW_MAKE_OTP=("publish-*" npm)
   eq "$(_apwz_make test </dev/null)" "make test got "; [[ ! -e $STUB_STATE/calls ]]'
 t 'make hook: not configured → make() not defined' '(( ! $+functions[make] ))'
+t 'pw-make add: saved (0600), live at once, survives a new shell' '
+  paired; pw-make add "publish-*" npm 2>/dev/null
+  (( $+functions[make] )); eq "$(make publish-x 2>/dev/null)" "make publish-x got 424242"
+  f=$XDG_CONFIG_HOME/apple-passwords/make-hooks; eq $(stat -f %Lp $f) 600
+  eq "$(zsh -fc "source $ROOT/apple-passwords.plugin.zsh; print \${(kv)APPLE_PW_MAKE_OTP}; whence -w make")" "publish-* npm
+make: function"'
+t 'pw-make remove: gone from file and shell' '
+  pw-make add "a-*" aws 2>/dev/null; pw-make remove "a-*" 2>/dev/null
+  (( ! $+functions[make] )); eq "$(pw-make list)" ""'
+t 'pw-make: zsh-config hooks merge with saved ones and win' '
+  pw-make add "x-*" npm 2>/dev/null
+  eq "$(zsh -fc "typeset -A APPLE_PW_MAKE_OTP=(x-\\* aws y-\\* gcp); source $ROOT/apple-passwords.plugin.zsh; print \${APPLE_PW_MAKE_OTP[x-*]} \${APPLE_PW_MAKE_OTP[y-*]}")" "aws gcp"'
+t 'pw-make: does not replace a user'"'"'s own make function' '
+  make() { print mine }; pw-make add "z-*" npm 2>/dev/null; eq "$(make z-1)" mine'
+t 'pw-make detect: groups targets that read a code, guesses aws' '
+  printf "MFA ?= \$(shell read -r -p x pwd)\n\nlogin-aws-prod:\n\t@read -p \"MFA Code: \" mfa; \\\\\n\tpython login_aws.py -m \$\$mfa\n\nlogin-aws-dev:\n\t@read -p \"MFA Code: \" mfa; \\\\\n\tpython login_aws.py -m \$\$mfa\n\ntest:\n\tpytest\n" > Makefile
+  out=$(pw-make detect 2>&1); print -r -- $out | grep -q "login-aws-dev, login-aws-prod"
+  print -r -- $out | grep -q "pw-make add .login-aws-\*. aws"; ! print -r -- $out | grep -q test'
+t 'pw-make detect: with a terminal, Enter accepts the suggestion' '
+  printf "login-aws-prod:\n\t@read -p \"MFA Code: \" mfa\nlogin-aws-dev:\n\t@read -p \"MFA Code: \" mfa\n" > Makefile
+  print "" > answers; _APWZ_TTY=$PWD/answers; pw-make detect >/dev/null 2>&1
+  eq "$(pw-make list)" "login-aws-*              → aws"'
 
 print
 print "$pass passed, $fail failed"

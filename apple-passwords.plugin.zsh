@@ -10,6 +10,7 @@
 zmodload zsh/datetime 2>/dev/null
 
 typeset -g _APWZ_CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/config.zsh
+typeset -g _APWZ_HOOKS=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/make-hooks
 typeset -g _APWZ_CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/apple-passwords
 typeset -g _APWZ_TTY=${_APWZ_TTY:-/dev/tty}
 typeset -g _APWZ_APW_SOCK=$HOME/.apw/apw.sock
@@ -359,6 +360,13 @@ server's login under its hostname. Other prompts (host keys, passphrases) still 
     npmotp) print -r -- "usage: npmotp [npm|pnpm|yarn] args...
 
 Run with --otp=<your npmjs.com 2FA code>. Example: npmotp publish" ;;
+    pw-make) print -r -- "usage: pw-make detect [Makefile] | pw-make add <target-pattern> <site>
+       pw-make remove <target-pattern> | pw-make list
+
+Make targets that read a 2FA code from the terminal (e.g. read -p \"MFA Code: \" mfa)
+get it from Apple Passwords instead; other targets run untouched.
+  pw-make detect             scan ./Makefile and offer hooks for targets that read a code
+  pw-make add 'login-aws-*' aws" ;;
     pw-git) print -r -- "usage: pw-git enable|disable <host> | pw-git list
 
 Let git fetch HTTPS credentials for <host> from Apple Passwords (per host only).
@@ -594,7 +602,106 @@ _apwz_make() {
   _apwz_msg "🔑 2FA code for $reply[2]${reply[3]:+ ($reply[3])} passed to make"
   print -r -- $reply[1] | command make "$@"
 }
-[[ ${(t)APPLE_PW_MAKE_OTP} == association* ]] && make() { _apwz_make "$@" }
+# Read the saved hooks file (lines: pattern<TAB>site) into an associative array name.
+_apwz_hooks_read() {
+  local line
+  [[ -r $_APWZ_HOOKS ]] || return 0
+  for line in "${(@f)$(<$_APWZ_HOOKS)}"; do
+    [[ $line == *$'\t'* && $line != \#* ]] && eval "$1[\${line%%\$'\t'*}]=\${line#*\$'\t'}"
+  done
+}
+
+# Wrap make only while at least one hook exists, and never over a user's own make().
+_apwz_enable_make() {
+  (( ${#APPLE_PW_MAKE_OTP} )) || return 0
+  (( $+functions[make] || $+aliases[make] )) && [[ ${functions[make]} != *_apwz_make* ]] && return 0
+  make() { _apwz_make "$@" }
+}
+
+# Hooks = what the user set in their zsh config (wins) + the saved file (pw-make).
+[[ ${(t)APPLE_PW_MAKE_OTP} == association* ]] || { unset APPLE_PW_MAKE_OTP; typeset -gA APPLE_PW_MAKE_OTP }
+() {
+  local -A saved; local pat
+  _apwz_hooks_read saved
+  for pat in ${(k)saved}; do (( ${+APPLE_PW_MAKE_OTP[$pat]} )) || APPLE_PW_MAKE_OTP[$pat]=$saved[$pat]; done
+}
+_apwz_enable_make
+
+# pw-make add|remove|list|detect — manage which make targets get a 2FA code.
+pw-make() {
+  emulate -L zsh -o extended_glob
+  local -A saved
+  _apwz_hooks_read saved
+  _apwz_hooks_write() {
+    (umask 077; mkdir -p ${_APWZ_HOOKS:h}
+     { print -r -- "# apple-passwords make hooks — managed by pw-make (pattern<TAB>site)"
+       local k; for k in ${(ko)saved}; do print -r -- "$k"$'\t'"$saved[$k]"; done } >| $_APWZ_HOOKS)
+  }
+  case $1 in
+    add)
+      [[ -n $2 && -n $3 ]] || { _apwz_usage pw-make >&2; return 2 }
+      saved[$2]=$3; _apwz_hooks_write
+      APPLE_PW_MAKE_OTP[$2]=$3; _apwz_enable_make
+      _apwz_msg "✓ make targets matching '$2' will get the 2FA code for $3" ;;
+    remove|rm)
+      [[ -n $2 ]] || { _apwz_usage pw-make >&2; return 2 }
+      if (( ! ${+saved[$2]} )); then _apwz_err "no saved hook '$2' (pw-make list)"; return 1; fi
+      unset "saved[$2]"; _apwz_hooks_write
+      unset "APPLE_PW_MAKE_OTP[$2]"
+      (( ${#APPLE_PW_MAKE_OTP} )) || { [[ ${functions[make]} == *_apwz_make* ]] && unfunction make }
+      _apwz_msg "✓ removed '$2'" ;;
+    list|"")
+      local k
+      for k in ${(ko)APPLE_PW_MAKE_OTP}; do
+        if (( ${+saved[$k]} )); then print -r -- "${(r:24:)k} → $APPLE_PW_MAKE_OTP[$k]"
+        else print -r -- "${(r:24:)k} → $APPLE_PW_MAKE_OTP[$k]   (set in your zsh config)"; fi
+      done ;;
+    detect) _apwz_make_detect "${2:-Makefile}" ;;
+    -h|--help) _apwz_usage pw-make ;;
+    *) _apwz_usage pw-make >&2; return 2 ;;
+  esac
+}
+
+# Find targets whose recipe reads a 2FA code, group them (login-aws-prod, login-aws-dev →
+# login-aws-*), guess the site, and offer to add them.
+_apwz_make_detect() {
+  local mf=$1 line target= rest
+  [[ -r $mf ]] || { _apwz_err "no $mf here — run in a project folder or pass the file"; return 1 }
+  local -A found recipe
+  for line in "${(@f)$(<$mf)}"; do
+    if [[ $line == (#b)([A-Za-z0-9_.%/-]##):([^=]*|) ]]; then target=$match[1]; continue; fi
+    if [[ $line == $'\t'* && -n $target ]]; then
+      recipe[$target]+=" ${line:l}"
+      [[ ${line:l} == *read*(mfa|otp|2fa|code|token)* ]] && found[$target]=1
+    elif [[ $line != [[:space:]]# ]]; then
+      target=
+    fi
+  done
+  if (( ! ${#found} )); then _apwz_msg "No targets in $mf read a 2FA code."; return 0; fi
+
+  local -A groups; local t prefix
+  for t in ${(ko)found}; do
+    prefix=${t%-*}
+    if [[ $prefix != $t ]] && (( ${#${(M)${(k)found}:#$prefix-*}} > 1 )); then groups[$prefix-*]+=" $t"
+    else groups[$t]=" $t"; fi
+  done
+  local pat site ans members
+  for pat in ${(ko)groups}; do
+    members=${groups[$pat]# }
+    site=
+    for t in ${=members}; do
+      [[ "$t ${recipe[$t]}" == *aws* ]] && site=aws
+    done
+    _apwz_msg "Found: ${members// /, }"
+    if ! _apwz_has_tty; then
+      _apwz_msg "  suggest: pw-make add '$pat' ${site:-<site>}"; continue
+    fi
+    read -r "ans?  Hook '$pat' to which site's 2FA code? [${site:-skip}] " <$_APWZ_TTY || ans=
+    ans=${ans:-$site}
+    [[ -n $ans && $ans != skip ]] || { _apwz_msg "  skipped"; continue }
+    pw-make add "$pat" "$ans"
+  done
+}
 
 # pw-git enable|disable|list [host] — answer git's HTTPS credential requests for a host.
 pw-git() {
