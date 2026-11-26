@@ -86,6 +86,7 @@ host or account it needs**. Nothing guesses from screen output.
 | **Docker** | `pw-docker enable ghcr.io`, `pw-docker enable docker` | Adds a per-registry `credHelpers` entry using `docker-credential-apple-passwords`. Docker Hub logins are looked up under `docker.com`. Your other Docker settings are left untouched. |
 | **npm / pnpm / yarn** | `npmotp publish`, `npmotp pnpm publish` | Adds `--otp=<code>` from your npmjs.com 2FA entry. |
 | **Postgres / MySQL / PyPI** | `pwrun --pg admin@db.host -- psql`, `pwrun --mysql …`, `pwrun --twine pypi -- twine upload dist/*` | Fills `PGHOST/PGUSER/PGPASSWORD`, `MYSQL_HOST/MYSQL_PWD`, `TWINE_USERNAME/TWINE_PASSWORD` for that one command. |
+| **make targets** that read a 2FA code (`read -p "MFA Code: " mfa`) | `make login-aws-prod`, unchanged | Opt-in: `typeset -A APPLE_PW_MAKE_OTP=('login-aws-*' aws)` (before the plugin loads). Matching targets get the code from Apple Passwords on stdin; every other `make` runs untouched. Without the hook, `otp aws \| make login-aws-prod` does the same. |
 | **gh, gcloud, az, Vercel, Heroku** | — | They log in through the browser, which uses Apple Passwords directly. |
 
 Tool aliases: `aws`, `npm`/`pnpm`/`yarn` (npmjs.com), `docker`/`dockerhub` (docker.com),
@@ -116,6 +117,7 @@ to the same entry. For `awsmfa`, the 2FA entry is matched by your MFA device nam
 | `APPLE_PW_BIND_KEYS` | `1` | <kbd>Ctrl-X</kbd> <kbd>p</kbd> / <kbd>o</kbd> |
 | `APPLE_PW_CACHE` | `1` | Remember site + username (never secrets) for completion and shorthand |
 | `APPLE_PW_ALIASES` | unset | Associative array of your own aliases, e.g. `(work sso.example.com)` |
+| `APPLE_PW_MAKE_OTP` | unset | Associative array: make target pattern → site whose 2FA code is fed to that target |
 | `APPLE_PW_NO_SETUP` | unset | `1` skips the first-run wizard |
 
 ## Security model

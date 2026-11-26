@@ -252,7 +252,7 @@ _apwz_touch() {
   (( APPLE_PW_AUTOLOCK > 0 )) || return 0
   _apwz_mkcache
   local f=$_APWZ_CACHE_DIR/last-use stamp=$EPOCHREALTIME
-  print -r -- $stamp >| $f
+  (umask 077; print -r -- $stamp >| $f)
   zsh -fc '
     sleep $1
     [[ -r $2 && $(<$2) == $3 ]] || exit 0
@@ -573,6 +573,28 @@ npmotp() {
   _apwz_fresh_otp npm "$reply[2]" || return
   command $tool "$@" --otp=$reply[1]
 }
+
+# make targets that read a 2FA code from stdin (e.g. `read -p "MFA Code: " mfa`). Opt-in:
+#   typeset -A APPLE_PW_MAKE_OTP=('login-aws-*' aws)
+# Then `make login-aws-prod` gets the code from Apple Passwords; other targets are untouched.
+_apwz_make() {
+  emulate -L zsh -o extended_glob
+  local arg pat site=
+  if [[ ${(t)APPLE_PW_MAKE_OTP} == association* ]]; then
+    for arg in "$@"; do
+      for pat in ${(k)APPLE_PW_MAKE_OTP}; do
+        [[ $arg == ${~pat} ]] && { site=$APPLE_PW_MAKE_OTP[$pat]; break 2 }
+      done
+    done
+  fi
+  [[ -n $site ]] || { command make "$@"; return }
+  local -a reply
+  _apwz_get otp $site || return
+  _apwz_fresh_otp $site "$reply[2]" || return
+  _apwz_msg "🔑 2FA code for $reply[2]${reply[3]:+ ($reply[3])} passed to make"
+  print -r -- $reply[1] | command make "$@"
+}
+[[ ${(t)APPLE_PW_MAKE_OTP} == association* ]] && make() { _apwz_make "$@" }
 
 # pw-git enable|disable|list [host] — answer git's HTTPS credential requests for a host.
 pw-git() {

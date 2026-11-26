@@ -240,6 +240,14 @@ t 'pwrun --pg sets PGHOST/PGUSER/PGPASSWORD' '
 t 'pwrun --twine sets TWINE_USERNAME/TWINE_PASSWORD' '
   paired; eq "$(pwrun --twine srv.example.com -- zsh -fc "print \$TWINE_USERNAME \$TWINE_PASSWORD")" "deploy ssh-pw"'
 
+t 'make hook: mapped target gets the 2FA code on stdin' '
+  paired; typeset -A APPLE_PW_MAKE_OTP=("publish-*" npm)
+  eq "$(_apwz_make publish-prod 2>/dev/null)" "make publish-prod got 424242"'
+t 'make hook: other targets run untouched (no lookup)' '
+  paired; typeset -A APPLE_PW_MAKE_OTP=("publish-*" npm)
+  eq "$(_apwz_make test </dev/null)" "make test got "; [[ ! -e $STUB_STATE/calls ]]'
+t 'make hook: not configured → make() not defined' '(( ! $+functions[make] ))'
+
 print
 print "$pass passed, $fail failed"
 (( fail == 0 ))

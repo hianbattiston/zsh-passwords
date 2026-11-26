@@ -1,0 +1,4 @@
+#!/bin/zsh -f
+# Fake make: emulates a recipe that does `read -p "MFA Code: " mfa`.
+IFS= read -r mfa
+print -r -- "make $* got $mfa"
