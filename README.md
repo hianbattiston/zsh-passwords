@@ -195,3 +195,8 @@ What you should know about the backends:
 
 `zsh tests/run.zsh` runs offline against fake backends and a fake clipboard; it never touches
 real passwords.
+
+## Roadmap
+
+Linux, Windows and other password managers (1Password, Bitwarden, KeePassXC, …) are planned —
+see [docs/ROADMAP.md](docs/ROADMAP.md).
