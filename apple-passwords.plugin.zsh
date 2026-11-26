@@ -10,8 +10,10 @@
 zmodload zsh/datetime 2>/dev/null
 
 typeset -g _APWZ_CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/config.zsh
-typeset -g _APWZ_HOOKS=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/make-hooks
+typeset -g _APWZ_HOOKS=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/hooks
+typeset -g _APWZ_HOOKS_LEGACY=${XDG_CONFIG_HOME:-$HOME/.config}/apple-passwords/make-hooks
 typeset -g _APWZ_CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/apple-passwords
+typeset -g _APWZ_TAB=$'\t'   # (\$'\t' isn't expanded inside assoc subscripts)
 typeset -g _APWZ_TTY=${_APWZ_TTY:-/dev/tty}
 typeset -g _APWZ_APW_SOCK=$HOME/.apw/apw.sock
 typeset -g _APWZ_ROOT=${${(%):-%x}:A:h}
@@ -360,13 +362,19 @@ server's login under its hostname. Other prompts (host keys, passphrases) still 
     npmotp) print -r -- "usage: npmotp [npm|pnpm|yarn] args...
 
 Run with --otp=<your npmjs.com 2FA code>. Example: npmotp publish" ;;
-    pw-make) print -r -- "usage: pw-make detect [Makefile] | pw-make add <target-pattern> <site>
-       pw-make remove <target-pattern> | pw-make list
+    pw-hooks) print -r -- "usage: pw-hooks detect [dir]
+       pw-hooks add make|script <pattern> <site>
+       pw-hooks remove make|script <pattern>
+       pw-hooks list
 
-Make targets that read a 2FA code from the terminal (e.g. read -p \"MFA Code: \" mfa)
-get it from Apple Passwords instead; other targets run untouched.
-  pw-make detect             scan ./Makefile and offer hooks for targets that read a code
-  pw-make add 'login-aws-*' aws" ;;
+Commands that ask for a 2FA code get it from Apple Passwords instead:
+  make <target>                      (Makefile targets)
+  npm run / pnpm / yarn / bun <script> (package.json scripts)
+The code arrives on stdin (for read -p \"MFA Code: \" prompts), as \$APPLE_PW_OTP, and
+for npm as NPM_CONFIG_OTP. Other targets/scripts run untouched.
+  pw-hooks detect                         scan ./Makefile and ./package.json, offer hooks
+  pw-hooks add make 'login-aws-*' aws
+  pw-hooks add script 'release:*' npm" ;;
     pw-git) print -r -- "usage: pw-git enable|disable <host> | pw-git list
 
 Let git fetch HTTPS credentials for <host> from Apple Passwords (per host only).
@@ -582,124 +590,229 @@ npmotp() {
   command $tool "$@" --otp=$reply[1]
 }
 
-# make targets that read a 2FA code from stdin (e.g. `read -p "MFA Code: " mfa`). Opt-in:
-#   typeset -A APPLE_PW_MAKE_OTP=('login-aws-*' aws)
-# Then `make login-aws-prod` gets the code from Apple Passwords; other targets are untouched.
-_apwz_make() {
-  emulate -L zsh -o extended_glob
-  local arg pat site=
-  if [[ ${(t)APPLE_PW_MAKE_OTP} == association* ]]; then
-    for arg in "$@"; do
-      for pat in ${(k)APPLE_PW_MAKE_OTP}; do
-        [[ $arg == ${~pat} ]] && { site=$APPLE_PW_MAKE_OTP[$pat]; break 2 }
-      done
-    done
-  fi
-  [[ -n $site ]] || { command make "$@"; return }
+# ------------------------------------------------------------------------ command hooks
+# Hooks feed a 2FA code to commands that ask for one, keyed by what is being run:
+#   make <target>                       APPLE_PW_MAKE_OTP    target pattern → site
+#   npm|pnpm|yarn|bun [run] <script>    APPLE_PW_SCRIPT_OTP  package.json script pattern → site
+# The code goes to the command's stdin (for `read -p "MFA Code: "` prompts) and into
+# $APPLE_PW_OTP; for npmjs.com also NPM_CONFIG_OTP (npm publish inside a script).
+# Manage them with pw-hooks (saved in ~/.config/apple-passwords/hooks) or set the arrays in
+# your zsh config before the plugin loads (those win).
+
+# Is there a hook for this kind (make|script) and name? → REPLY = site
+_apwz_hook_site() {
+  local var=APPLE_PW_MAKE_OTP pat
+  [[ $1 == script ]] && var=APPLE_PW_SCRIPT_OTP
+  local -A map; map=("${(@kvP)var}")
+  REPLY=
+  for pat in ${(k)map}; do
+    [[ $2 == ${~pat} ]] && { REPLY=$map[$pat]; return 0 }
+  done
+  return 1
+}
+
+# _apwz_run_with_otp SITE command args… — run with the site's current 2FA code.
+_apwz_run_with_otp() {
+  local site=$1; shift
   local -a reply
   _apwz_get otp $site || return
   _apwz_fresh_otp $site "$reply[2]" || return
-  _apwz_msg "🔑 2FA code for $reply[2]${reply[3]:+ ($reply[3])} passed to make"
-  print -r -- $reply[1] | command make "$@"
+  local code=$reply[1]
+  _apwz_msg "🔑 2FA code for $reply[2]${reply[3]:+ ($reply[3])} passed to $1"
+  _apwz_resolve_site $site
+  if [[ $REPLY == npmjs.com ]]; then
+    print -r -- $code | APPLE_PW_OTP=$code NPM_CONFIG_OTP=$code command "$@"
+  else
+    print -r -- $code | APPLE_PW_OTP=$code command "$@"
+  fi
 }
-# Read the saved hooks file (lines: pattern<TAB>site) into an associative array name.
+
+_apwz_make() {
+  emulate -L zsh -o extended_glob
+  local arg
+  for arg in "$@"; do
+    [[ $arg == -* || $arg == *=* ]] && continue
+    if _apwz_hook_site make $arg; then _apwz_run_with_otp $REPLY make "$@"; return; fi
+  done
+  command make "$@"
+}
+
+# npm/pnpm/yarn/bun: work out which package.json script is being run.
+_apwz_scripts() {
+  emulate -L zsh -o extended_glob
+  local tool=$1; shift
+  local -a args; args=("$@")
+  local i=1 name=
+  while (( i <= $#args )) && [[ $args[i] == -* ]]; do (( i++ )); done
+  case $args[i] in
+    run|run-script|rum|urn)
+      (( i++ ))
+      while (( i <= $#args )) && [[ $args[i] == -* ]]; do (( i++ )); done
+      name=$args[i] ;;
+    start|test|stop|restart) name=$args[i] ;;
+    *) [[ $tool != npm ]] && name=$args[i] ;;      # pnpm/yarn/bun <script>
+  esac
+  if [[ -n $name ]] && _apwz_hook_site script $name; then
+    _apwz_run_with_otp $REPLY $tool "$@"; return
+  fi
+  command $tool "$@"
+}
+
+# Saved hooks → reply=(kind<TAB>pattern site …). Reads the old make-only file too.
 _apwz_hooks_read() {
-  local line
-  [[ -r $_APWZ_HOOKS ]] || return 0
-  for line in "${(@f)$(<$_APWZ_HOOKS)}"; do
-    [[ $line == *$'\t'* && $line != \#* ]] && eval "$1[\${line%%\$'\t'*}]=\${line#*\$'\t'}"
+  reply=()
+  local line; local -a f
+  if [[ -r $_APWZ_HOOKS_LEGACY ]]; then
+    for line in "${(@f)$(<$_APWZ_HOOKS_LEGACY)}"; do
+      [[ $line == \#* || $line != *$_APWZ_TAB* ]] && continue
+      reply+=("make"$_APWZ_TAB"${line%%$_APWZ_TAB*}" "${line#*$_APWZ_TAB}")
+    done
+  fi
+  if [[ -r $_APWZ_HOOKS ]]; then
+    for line in "${(@f)$(<$_APWZ_HOOKS)}"; do
+      [[ $line == \#* ]] && continue
+      f=("${(@ps:\t:)line}")
+      (( $#f == 3 )) && reply+=("$f[1]"$_APWZ_TAB"$f[2]" "$f[3]")
+    done
+  fi
+}
+
+# Wrap make / npm / pnpm / yarn / bun only while hooks of that kind exist, and never over a
+# function or alias of the user's own.
+_apwz_enable_hooks() {
+  local name
+  _apwz_wrap() {
+    if (( $+aliases[$1] )) || { (( $+functions[$1] )) && [[ $functions[$1] != *_apwz_* ]] }; then
+      return
+    fi
+    functions[$1]="$2 \"\$@\""
+  }
+  _apwz_unwrap() { [[ $functions[$1] == *_apwz_* ]] && unfunction $1 }
+  if (( ${#APPLE_PW_MAKE_OTP} )); then _apwz_wrap make _apwz_make; else _apwz_unwrap make; fi
+  for name in npm pnpm yarn bun; do
+    if (( ${#APPLE_PW_SCRIPT_OTP} )); then _apwz_wrap $name "_apwz_scripts $name"; else _apwz_unwrap $name; fi
   done
 }
 
-# Wrap make only while at least one hook exists, and never over a user's own make().
-_apwz_enable_make() {
-  (( ${#APPLE_PW_MAKE_OTP} )) || return 0
-  (( $+functions[make] || $+aliases[make] )) && [[ ${functions[make]} != *_apwz_make* ]] && return 0
-  make() { _apwz_make "$@" }
-}
-
-# Hooks = what the user set in their zsh config (wins) + the saved file (pw-make).
-[[ ${(t)APPLE_PW_MAKE_OTP} == association* ]] || { unset APPLE_PW_MAKE_OTP; typeset -gA APPLE_PW_MAKE_OTP }
 () {
-  local -A saved; local pat
-  _apwz_hooks_read saved
-  for pat in ${(k)saved}; do (( ${+APPLE_PW_MAKE_OTP[$pat]} )) || APPLE_PW_MAKE_OTP[$pat]=$saved[$pat]; done
+  local var key
+  for var in APPLE_PW_MAKE_OTP APPLE_PW_SCRIPT_OTP; do
+    [[ ${(tP)var} == association* ]] || { unset $var; typeset -gA $var }
+  done
+  local -a reply; _apwz_hooks_read
+  local -A saved; saved=("${reply[@]}")
+  for key in ${(k)saved}; do
+    var=APPLE_PW_MAKE_OTP; [[ ${key%%$_APWZ_TAB*} == script ]] && var=APPLE_PW_SCRIPT_OTP
+    local pat=${key#*$_APWZ_TAB}
+    eval "(( \${+${var}[\$pat]} )) || ${var}[\$pat]=\$saved[\$key]"   # zsh config wins
+  done
 }
-_apwz_enable_make
+_apwz_enable_hooks
 
-# pw-make add|remove|list|detect — manage which make targets get a 2FA code.
-pw-make() {
+# pw-hooks add|remove|list|detect
+pw-hooks() {
   emulate -L zsh -o extended_glob
-  local -A saved
-  _apwz_hooks_read saved
+  local -a reply; _apwz_hooks_read
+  local -A saved; saved=("${reply[@]}")
+  local kind=$2
+  case $kind in
+    npm|pnpm|yarn|bun|script|scripts|package.json) kind=script ;;
+  esac
   _apwz_hooks_write() {
     (umask 077; mkdir -p ${_APWZ_HOOKS:h}
-     { print -r -- "# apple-passwords make hooks — managed by pw-make (pattern<TAB>site)"
-       local k; for k in ${(ko)saved}; do print -r -- "$k"$'\t'"$saved[$k]"; done } >| $_APWZ_HOOKS)
+     { print -r -- "# apple-passwords command hooks — managed by pw-hooks (kind<TAB>pattern<TAB>site)"
+       local k; for k in ${(ko)saved}; do print -r -- "$k"$_APWZ_TAB"$saved[$k]"; done } >| $_APWZ_HOOKS)
+    rm -f $_APWZ_HOOKS_LEGACY
   }
+  local var=APPLE_PW_MAKE_OTP; [[ $kind == script ]] && var=APPLE_PW_SCRIPT_OTP
   case $1 in
     add)
-      [[ -n $2 && -n $3 ]] || { _apwz_usage pw-make >&2; return 2 }
-      saved[$2]=$3; _apwz_hooks_write
-      APPLE_PW_MAKE_OTP[$2]=$3; _apwz_enable_make
-      _apwz_msg "✓ make targets matching '$2' will get the 2FA code for $3" ;;
+      [[ $kind == (make|script) && -n $3 && -n $4 ]] || { _apwz_usage pw-hooks >&2; return 2 }
+      saved[$kind$_APWZ_TAB$3]=$4; _apwz_hooks_write
+      eval "${var}[\$3]=\$4"; _apwz_enable_hooks
+      _apwz_msg "✓ ${${kind/make/make targets}/script/package.json scripts} matching '$3' will get the 2FA code for $4" ;;
     remove|rm)
-      [[ -n $2 ]] || { _apwz_usage pw-make >&2; return 2 }
-      if (( ! ${+saved[$2]} )); then _apwz_err "no saved hook '$2' (pw-make list)"; return 1; fi
-      unset "saved[$2]"; _apwz_hooks_write
-      unset "APPLE_PW_MAKE_OTP[$2]"
-      (( ${#APPLE_PW_MAKE_OTP} )) || { [[ ${functions[make]} == *_apwz_make* ]] && unfunction make }
-      _apwz_msg "✓ removed '$2'" ;;
+      [[ $kind == (make|script) && -n $3 ]] || { _apwz_usage pw-hooks >&2; return 2 }
+      if (( ! ${+saved[$kind$_APWZ_TAB$3]} )); then _apwz_err "no saved $kind hook '$3' (pw-hooks list)"; return 1; fi
+      unset "saved[$kind$_APWZ_TAB$3]"; _apwz_hooks_write
+      eval "unset \"${var}[\$3]\""; _apwz_enable_hooks
+      _apwz_msg "✓ removed $kind hook '$3'" ;;
     list|"")
-      local k
-      for k in ${(ko)APPLE_PW_MAKE_OTP}; do
-        if (( ${+saved[$k]} )); then print -r -- "${(r:24:)k} → $APPLE_PW_MAKE_OTP[$k]"
-        else print -r -- "${(r:24:)k} → $APPLE_PW_MAKE_OTP[$k]   (set in your zsh config)"; fi
+      local k pat
+      for kind var in make APPLE_PW_MAKE_OTP script APPLE_PW_SCRIPT_OTP; do
+        local -A map; map=("${(@kvP)var}")
+        for pat in ${(ko)map}; do
+          local note=
+          (( ${+saved[$kind$_APWZ_TAB$pat]} )) || note="   (set in your zsh config)"
+          printf '%-7s %-24s → %s%s\n' $kind $pat $map[$pat] $note
+        done
       done ;;
-    detect) _apwz_make_detect "${2:-Makefile}" ;;
-    -h|--help) _apwz_usage pw-make ;;
-    *) _apwz_usage pw-make >&2; return 2 ;;
+    detect) _apwz_hooks_detect "${2:-.}" ;;
+    -h|--help) _apwz_usage pw-hooks ;;
+    *) _apwz_usage pw-hooks >&2; return 2 ;;
   esac
 }
 
-# Find targets whose recipe reads a 2FA code, group them (login-aws-prod, login-aws-dev →
-# login-aws-*), guess the site, and offer to add them.
-_apwz_make_detect() {
-  local mf=$1 line target= rest
-  [[ -r $mf ]] || { _apwz_err "no $mf here — run in a project folder or pass the file"; return 1 }
-  local -A found recipe
-  for line in "${(@f)$(<$mf)}"; do
-    if [[ $line == (#b)([A-Za-z0-9_.%/-]##):([^=]*|) ]]; then target=$match[1]; continue; fi
-    if [[ $line == $'\t'* && -n $target ]]; then
-      recipe[$target]+=" ${line:l}"
-      [[ ${line:l} == *read*(mfa|otp|2fa|code|token)* ]] && found[$target]=1
-    elif [[ $line != [[:space:]]# ]]; then
-      target=
-    fi
-  done
-  if (( ! ${#found} )); then _apwz_msg "No targets in $mf read a 2FA code."; return 0; fi
+# Older spelling, kept as a shortcut: pw-make add <pattern> <site> etc.
+pw-make() {
+  case $1 in
+    add|remove|rm) pw-hooks $1 make "${@:2}" ;;
+    detect) pw-hooks detect "${2:+${2:h}}" ;;
+    *) pw-hooks "$@" ;;
+  esac
+}
 
-  local -A groups; local t prefix
-  for t in ${(ko)found}; do
-    prefix=${t%-*}
-    if [[ $prefix != $t ]] && (( ${#${(M)${(k)found}:#$prefix-*}} > 1 )); then groups[$prefix-*]+=" $t"
-    else groups[$t]=" $t"; fi
-  done
-  local pat site ans members
-  for pat in ${(ko)groups}; do
-    members=${groups[$pat]# }
-    site=
-    for t in ${=members}; do
-      [[ "$t ${recipe[$t]}" == *aws* ]] && site=aws
+# Scan ./Makefile and ./package.json for targets/scripts that ask for a 2FA code, group them
+# (login-aws-prod + login-aws-dev → login-aws-*, login:prod + login:dev → login:*), guess the
+# site and offer to add them.
+_apwz_hooks_detect() {
+  local dir=${1:-.} line target name kind pat site members ans t prefix sep k
+  local -A text found groups
+  if [[ -r $dir/Makefile ]]; then
+    for line in "${(@f)$(<$dir/Makefile)}"; do
+      if [[ $line == (#b)([A-Za-z0-9_.%/-]##):([^=]*|) ]]; then target=$match[1]; continue; fi
+      if [[ $line == $_APWZ_TAB* && -n $target ]]; then text[make$_APWZ_TAB$target]+=" ${line:l}"
+      elif [[ $line != [[:space:]]# ]]; then target=; fi
     done
-    _apwz_msg "Found: ${members// /, }"
+  fi
+  if [[ -r $dir/package.json ]] && (( $+commands[jq] )); then
+    for line in "${(@f)$(jq -r '.scripts // {} | to_entries[] | "\(.key)\t\(.value)"' $dir/package.json 2>/dev/null)}"; do
+      [[ $line == *$_APWZ_TAB* ]] && text[script$_APWZ_TAB${line%%$_APWZ_TAB*}]=" ${${line#*$_APWZ_TAB}:l}"
+    done
+  fi
+  for k in ${(k)text}; do
+    [[ $text[$k] == *read*(mfa|otp|2fa|code|token)* || $text[$k] == *(--otp|token-code|totp|mfa|2fa|one-time)* ]] \
+      && found[$k]=1
+  done
+  if (( ! ${#found} )); then
+    _apwz_msg "No Makefile targets or package.json scripts in ${dir:a} ask for a 2FA code."
+    _apwz_msg "(Scripts that prompt inside another file can be added by hand: pw-hooks add script <name> <site>)"
+    return 0
+  fi
+  for k in ${(ko)found}; do
+    kind=${k%%$_APWZ_TAB*} name=${k#*$_APWZ_TAB} prefix=${name%[-:]*}
+    if [[ $prefix != $name ]]; then
+      sep=${name[$#prefix+1]}
+      if (( ${#${(M)${(k)found}:#$kind$_APWZ_TAB$prefix$sep*}} > 1 )); then
+        groups[$kind$_APWZ_TAB$prefix$sep*]+=" $name"; continue
+      fi
+    fi
+    groups[$k]=" $name"
+  done
+  for k in ${(ko)groups}; do
+    kind=${k%%$_APWZ_TAB*} pat=${k#*$_APWZ_TAB} members=${groups[$k]# } site=
+    for t in ${=members}; do
+      [[ "$t $text[$kind$_APWZ_TAB$t]" == *aws* ]] && site=aws
+      [[ -z $site && $text[$kind$_APWZ_TAB$t] == *(npm\ publish|--otp)* ]] && site=npm
+    done
+    _apwz_msg "Found ${${kind/make/make targets}/script/package.json scripts}: ${members// /, }"
     if ! _apwz_has_tty; then
-      _apwz_msg "  suggest: pw-make add '$pat' ${site:-<site>}"; continue
+      _apwz_msg "  suggest: pw-hooks add $kind '$pat' ${site:-<site>}"; continue
     fi
     read -r "ans?  Hook '$pat' to which site's 2FA code? [${site:-skip}] " <$_APWZ_TTY || ans=
     ans=${ans:-$site}
     [[ -n $ans && $ans != skip ]] || { _apwz_msg "  skipped"; continue }
-    pw-make add "$pat" "$ans"
+    pw-hooks add $kind "$pat" "$ans"
   done
 }
 

@@ -58,7 +58,7 @@ The first lookup runs a short setup wizard (`pw-setup` reruns it).
 | `pwlogin <site> [user]` | Copies the password, then after a key press the 2FA code (`q` skips). |
 | `pwrun [-e VAR=[user@]site]… [-t VAR=[user@]site]… -- cmd …` | Runs `cmd` with passwords (`-e`) / 2FA codes (`-t`) in its environment only. Usernames may contain `@` (split on the last one). Presets: `--pg`, `--mysql`, `--twine`. |
 | `pw-setup` | Configure auto-lock, clipboard clearing, backend, keybindings. |
-| `pw-make detect` / `add` / `remove` / `list` | Feed 2FA codes to make targets such as `make login-aws-prod` (see below). |
+| `pw-hooks detect` / `add` / `remove` / `list` | Feed 2FA codes to make targets and package.json scripts (see below). |
 | `pw-status` / `pw-pair` / `pw-lock` | Health check / pair now / stop the bridge and drop pairing. |
 
 - **One prompt per lookup:** macOS asks you to authorise every password it hands out. Like a
@@ -87,35 +87,51 @@ host or account it needs**. Nothing guesses from screen output.
 | **Docker** | `pw-docker enable ghcr.io`, `pw-docker enable docker` | Adds a per-registry `credHelpers` entry using `docker-credential-apple-passwords`. Docker Hub logins are looked up under `docker.com`. Your other Docker settings are left untouched. |
 | **npm / pnpm / yarn** | `npmotp publish`, `npmotp pnpm publish` | Adds `--otp=<code>` from your npmjs.com 2FA entry. |
 | **Postgres / MySQL / PyPI** | `pwrun --pg admin@db.host -- psql`, `pwrun --mysql …`, `pwrun --twine pypi -- twine upload dist/*` | Fills `PGHOST/PGUSER/PGPASSWORD`, `MYSQL_HOST/MYSQL_PWD`, `TWINE_USERNAME/TWINE_PASSWORD` for that one command. |
-| **make targets** that read a 2FA code (`read -p "MFA Code: " mfa`) | `make login-aws-prod`, unchanged | Set up once per project with `pw-make detect` (see below). Matching targets get the code from Apple Passwords; every other `make` runs untouched. |
+| **make targets / package.json scripts** that need a 2FA code | `make login-aws-prod`, `npm run login:prod`, `pnpm release`, unchanged | Set up once per project with `pw-hooks detect` (see below). Matching targets/scripts get the code from Apple Passwords; everything else runs untouched. |
 | **gh, gcloud, az, Vercel, Heroku** | — | They log in through the browser, which uses Apple Passwords directly. |
 
-### make hooks (`pw-make`)
+### Command hooks (`pw-hooks`): Makefiles and package.json scripts
 
-Many teams log in through a Makefile target that asks for the MFA code. Keep typing the same
-command; the plugin answers the prompt:
+Many teams log in or publish through a Makefile target or a package.json script that asks for
+the MFA code. Keep typing the same command; the plugin supplies the code:
 
 ```console
 $ cd ~/work/project
-$ pw-make detect                       # scans ./Makefile for targets that read a 2FA code
-Found: login-aws-dev, login-aws-prod, login-aws-stag
+$ pw-hooks detect                 # scans ./Makefile and ./package.json
+Found make targets: login-aws-dev, login-aws-prod, login-aws-stag
   Hook 'login-aws-*' to which site's 2FA code? [aws]   ← Enter
 ✓ make targets matching 'login-aws-*' will get the 2FA code for aws
-$ make login-aws-prod                  # one Touch ID, the code goes into "MFA Code:"
+Found package.json scripts: release
+  Hook 'release' to which site's 2FA code? [npm]       ← Enter
+✓ package.json scripts matching 'release' will get the 2FA code for npm
+$ make login-aws-prod             # one Touch ID, the code goes into "MFA Code:"
+$ npm run release                 # npm publish inside the script gets --otp automatically
 ```
+
+The code is handed over three ways:
+- on **stdin**, for `read -p "MFA Code: " mfa` prompts;
+- as **`$APPLE_PW_OTP`**, so scripts can use `--token-code $APPLE_PW_OTP`;
+- for npm sites, also as **`NPM_CONFIG_OTP`**, so `npm publish` inside the script needs no prompt.
 
 | Command | |
 |---|---|
-| `pw-make detect [Makefile]` | Find targets whose recipe reads a code, group them (`login-aws-*`), guess the site, and offer to add them |
-| `pw-make add <pattern> <site>` | Hook targets matching a glob pattern to a site's 2FA code |
-| `pw-make remove <pattern>` / `pw-make list` | Remove / show hooks |
+| `pw-hooks detect [dir]` | Find Makefile targets and package.json scripts that ask for a code, group them (`login-aws-*`, `login:*`), guess the site, and offer to add them |
+| `pw-hooks add make\|script <pattern> <site>` | Hook make targets / package.json scripts matching a glob pattern |
+| `pw-hooks remove make\|script <pattern>` / `pw-hooks list` | Remove / show hooks |
 
-Hooks are saved in `~/.config/apple-passwords/make-hooks` (separate from `pw-setup`'s file),
-take effect immediately, and apply to every project. While any hook exists, `make` is a thin
-wrapper that only acts on matching targets; it never replaces a `make` function or alias of
-your own. You can also define hooks in your zsh config:
-`typeset -A APPLE_PW_MAKE_OTP=('login-aws-*' aws)` (these win over saved ones). Without hooks,
-`otp aws | make login-aws-prod` does the same thing once.
+What gets wrapped:
+- **Scripts:** `npm run <script>` (and `npm test/start/stop/restart`), `pnpm <script>`,
+  `yarn <script>`, `bun run <script>`.
+- **Make targets:** `make <target>`.
+
+Hooks are saved in `~/.config/apple-passwords/hooks` (separate from `pw-setup`'s file), take
+effect immediately, and apply to every project. The wrappers exist only while hooks of that
+kind exist, act only on matching names, and never replace a function or alias of your own.
+
+You can also set hooks in your zsh config; these win over saved ones:
+`typeset -A APPLE_PW_MAKE_OTP=('login-aws-*' aws)` / `typeset -A APPLE_PW_SCRIPT_OTP=('release' npm)`.
+`pw-make` still works as a shortcut for make hooks. Scripts that prompt from inside another
+file aren't detected; add them by hand with `pw-hooks add script <name> <site>`.
 
 Tool aliases: `aws`, `npm`/`pnpm`/`yarn` (npmjs.com), `docker`/`dockerhub` (docker.com),
 `pypi`/`twine`, `github`, `gitlab`, `bitbucket`, `gcp` (google.com), `azure`
@@ -145,7 +161,7 @@ to the same entry. For `awsmfa`, the 2FA entry is matched by your MFA device nam
 | `APPLE_PW_BIND_KEYS` | `1` | <kbd>Ctrl-X</kbd> <kbd>p</kbd> / <kbd>o</kbd> |
 | `APPLE_PW_CACHE` | `1` | Remember site + username (never secrets) for completion and shorthand |
 | `APPLE_PW_ALIASES` | unset | Associative array of your own aliases, e.g. `(work sso.example.com)` |
-| `APPLE_PW_MAKE_OTP` | unset | Associative array: make target pattern → site (prefer `pw-make add`) |
+| `APPLE_PW_MAKE_OTP` / `APPLE_PW_SCRIPT_OTP` | unset | Associative arrays: make target / package.json script pattern → site (prefer `pw-hooks add`) |
 | `APPLE_PW_NO_SETUP` | unset | `1` skips the first-run wizard |
 
 ## Security model

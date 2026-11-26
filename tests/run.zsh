@@ -247,28 +247,61 @@ t 'make hook: other targets run untouched (no lookup)' '
   paired; typeset -A APPLE_PW_MAKE_OTP=("publish-*" npm)
   eq "$(_apwz_make test </dev/null)" "make test got "; [[ ! -e $STUB_STATE/calls ]]'
 t 'make hook: not configured → make() not defined' '(( ! $+functions[make] ))'
-t 'pw-make add: saved (0600), live at once, survives a new shell' '
+t 'pw-make add (shortcut): saved 0600, live at once, survives a new shell' '
   paired; pw-make add "publish-*" npm 2>/dev/null
   (( $+functions[make] )); eq "$(make publish-x 2>/dev/null)" "make publish-x got 424242"
-  f=$XDG_CONFIG_HOME/apple-passwords/make-hooks; eq $(stat -f %Lp $f) 600
+  f=$XDG_CONFIG_HOME/apple-passwords/hooks; eq $(stat -f %Lp $f) 600
   eq "$(zsh -fc "source $ROOT/apple-passwords.plugin.zsh; print \${(kv)APPLE_PW_MAKE_OTP}; whence -w make")" "publish-* npm
 make: function"'
-t 'pw-make remove: gone from file and shell' '
-  pw-make add "a-*" aws 2>/dev/null; pw-make remove "a-*" 2>/dev/null
-  (( ! $+functions[make] )); eq "$(pw-make list)" ""'
-t 'pw-make: zsh-config hooks merge with saved ones and win' '
-  pw-make add "x-*" npm 2>/dev/null
+t 'pw-hooks remove: gone from file and shell' '
+  pw-hooks add make "a-*" aws 2>/dev/null; pw-hooks remove make "a-*" 2>/dev/null
+  (( ! $+functions[make] )); eq "$(pw-hooks list)" ""'
+t 'pw-hooks: zsh-config hooks merge with saved ones and win' '
+  pw-hooks add make "x-*" npm 2>/dev/null
   eq "$(zsh -fc "typeset -A APPLE_PW_MAKE_OTP=(x-\\* aws y-\\* gcp); source $ROOT/apple-passwords.plugin.zsh; print \${APPLE_PW_MAKE_OTP[x-*]} \${APPLE_PW_MAKE_OTP[y-*]}")" "aws gcp"'
-t 'pw-make: does not replace a user'"'"'s own make function' '
-  make() { print mine }; pw-make add "z-*" npm 2>/dev/null; eq "$(make z-1)" mine'
-t 'pw-make detect: groups targets that read a code, guesses aws' '
+t 'pw-hooks: does not replace a user'"'"'s own make function' '
+  make() { print mine }; pw-hooks add make "z-*" npm 2>/dev/null; eq "$(make z-1)" mine'
+t 'pw-hooks: migrates the old make-hooks file' '
+  mkdir -p $XDG_CONFIG_HOME/apple-passwords
+  print "login-aws-*\taws" > $XDG_CONFIG_HOME/apple-passwords/make-hooks
+  eq "$(zsh -fc "source $ROOT/apple-passwords.plugin.zsh; pw-hooks list")" "make    login-aws-*              → aws"
+  zsh -fc "source $ROOT/apple-passwords.plugin.zsh; pw-hooks add script x npm" 2>/dev/null
+  [[ ! -e $XDG_CONFIG_HOME/apple-passwords/make-hooks ]]
+  grep -q "^make	login-aws-\*	aws$" $XDG_CONFIG_HOME/apple-passwords/hooks'
+
+t 'script hook: npm run <script> gets code on stdin + APPLE_PW_OTP' '
+  paired; pw-hooks add script "login:*" github 2>/dev/null
+  pw-hooks add script "release" npm 2>/dev/null
+  eq "$(npm run login:prod 2>/dev/null </dev/null | sed "s/=[0-9][0-9]*/=N/g")" "npm run login:prod got=N env=N npm_otp=none"'
+t 'script hook: npm site also sets NPM_CONFIG_OTP' '
+  paired; pw-hooks add script release npm 2>/dev/null
+  eq "$(npm run --silent release 2>/dev/null)" "npm run --silent release got=424242 env=424242 npm_otp=424242"'
+t 'script hook: pnpm/yarn/bun <script> and npm test' '
+  paired; pw-hooks add script release npm 2>/dev/null; pw-hooks add script test npm 2>/dev/null
+  eq "$(pnpm release 2>/dev/null)" "pnpm release got=424242 env=424242 npm_otp=424242"
+  eq "$(yarn run release 2>/dev/null)" "yarn run release got=424242 env=424242 npm_otp=424242"
+  eq "$(bun run release 2>/dev/null)" "bun run release got=424242 env=424242 npm_otp=424242"
+  eq "$(npm test 2>/dev/null)" "npm test got=424242 env=424242 npm_otp=424242"'
+t 'script hook: other scripts and npm commands untouched' '
+  paired; pw-hooks add script release npm 2>/dev/null
+  eq "$(npm run build)" "npm run build"; eq "$(npm install release)" "npm install release"
+  [[ ! -e $STUB_STATE/calls ]]'
+
+t 'detect: Makefile targets grouped, aws guessed' '
   printf "MFA ?= \$(shell read -r -p x pwd)\n\nlogin-aws-prod:\n\t@read -p \"MFA Code: \" mfa; \\\\\n\tpython login_aws.py -m \$\$mfa\n\nlogin-aws-dev:\n\t@read -p \"MFA Code: \" mfa; \\\\\n\tpython login_aws.py -m \$\$mfa\n\ntest:\n\tpytest\n" > Makefile
-  out=$(pw-make detect 2>&1); print -r -- $out | grep -q "login-aws-dev, login-aws-prod"
-  print -r -- $out | grep -q "pw-make add .login-aws-\*. aws"; ! print -r -- $out | grep -q test'
-t 'pw-make detect: with a terminal, Enter accepts the suggestion' '
+  out=$(pw-hooks detect 2>&1); print -r -- $out | grep -q "make targets: login-aws-dev, login-aws-prod"
+  print -r -- $out | grep -q "pw-hooks add make .login-aws-\*. aws"; ! print -r -- $out | grep -q "test"'
+t 'detect: package.json scripts grouped by ":" and site guessed' '
+  print "{\"scripts\":{\"build\":\"tsc\",\"login:prod\":\"read -p MFA code; aws sts get-session-token --token-code \$code\",\"login:dev\":\"aws sts get-session-token --token-code \$APPLE_PW_OTP\",\"release\":\"npm publish --otp \$APPLE_PW_OTP\"}}" > package.json
+  out=$(pw-hooks detect 2>&1)
+  print -r -- $out | grep -q "package.json scripts: login:dev, login:prod"
+  print -r -- $out | grep -q "pw-hooks add script .login:\*. aws"
+  print -r -- $out | grep -q "pw-hooks add script .release. npm"; ! print -r -- $out | grep -q build'
+t 'detect: with a terminal, Enter accepts the suggestion' '
   printf "login-aws-prod:\n\t@read -p \"MFA Code: \" mfa\nlogin-aws-dev:\n\t@read -p \"MFA Code: \" mfa\n" > Makefile
-  print "" > answers; _APWZ_TTY=$PWD/answers; pw-make detect >/dev/null 2>&1
-  eq "$(pw-make list)" "login-aws-*              → aws"'
+  print "" > answers; _APWZ_TTY=$PWD/answers; pw-hooks detect >/dev/null 2>&1
+  eq "$(pw-hooks list)" "make    login-aws-*              → aws"'
+t 'detect: nothing found → says so' 'print "{\"scripts\":{\"b\":\"tsc\"}}" > package.json; pw-hooks detect 2>&1 | grep -q "No Makefile targets or package.json scripts"'
 
 print
 print "$pass passed, $fail failed"

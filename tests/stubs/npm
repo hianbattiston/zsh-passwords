@@ -1,2 +1,9 @@
 #!/bin/zsh -f
-print -r -- "npm $*"
+# Fake npm/pnpm/yarn/bun. When run through a hook ($APPLE_PW_OTP set) it also reports what
+# arrived on stdin and in NPM_CONFIG_OTP.
+if [[ -n $APPLE_PW_OTP ]]; then
+  IFS= read -r line
+  print -r -- "${0:t} $* got=$line env=$APPLE_PW_OTP npm_otp=${NPM_CONFIG_OTP:-none}"
+else
+  print -r -- "${0:t} $*"
+fi
